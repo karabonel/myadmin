@@ -359,9 +359,9 @@ app.get('/api/reports/orders/csv', superAuth, async (req,res)=>{
 
 // Frontend
 app.get('/', (req,res)=>{
-  const p=path.join(__dirname,'html.html');
+  const p=path.join(__dirname,'index.html');
   if(fs.existsSync(p)) res.sendFile(p);
-  else res.send('Super Admin - html.html missing');
+  else res.send('Super Admin - index.html missing');
 });
 
 mongoose.connect(MONGO_URI).then(()=> console.log('✅ Super Admin connected Mongo')).catch(console.error);
