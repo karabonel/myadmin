@@ -9,8 +9,8 @@ const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3002;
-const JWT_SECRET = process.env.JWT_SECRET || 'bcm-foodhub-secret-2024-goldbelly';
-const MONGO_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/bcm_foodhub';
+const JWT_SECRET = process.env.JWT_SECRET || 'rams-dough-secret-2026';
+const MONGO_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/rams_dough';
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -364,5 +364,5 @@ app.get('/', (req,res)=>{
   else res.send('Super Admin - html.html missing');
 });
 
-mongoose.connect(MONGO_URI).then(()=> console.log('âœ… Super Admin connected Mongo')).catch(console.error);
-app.listen(PORT,'0.0.0.0', ()=> console.log(`ðŸš€ Super Admin Portal http://localhost:${PORT} | login: admin@bcmfoodhub.co.za / admin123`));
+mongoose.connect(MONGO_URI).then(()=> console.log('✅ Super Admin connected Mongo')).catch(console.error);
+app.listen(PORT,'0.0.0.0', ()=> console.log(`🚀 Super Admin Portal http://localhost:${PORT} | login: admin@ramsdough.co.za / admin123`));
