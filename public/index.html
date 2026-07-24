@@ -1,0 +1,182 @@
+<!-- public/index.html (Super Admin Dashboard) -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Super Admin | Rams Dough</title>
+  <style>
+    :root { --bg: #f3f4f6; --surface: #ffffff; --primary: #111827; --accent: #2563eb; --success: #16a34a; --danger: #dc2626; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background: var(--bg); color: var(--primary); }
+    
+    .sidebar { width: 250px; background: var(--primary); color: white; height: 100vh; position: fixed; padding: 20px; box-sizing: border-box; }
+    .sidebar h2 { margin-top: 0; font-size: 1.5rem; letter-spacing: 0.5px; border-bottom: 1px solid #374151; padding-bottom: 15px; }
+    .sidebar ul { list-style: none; padding: 0; }
+    .sidebar li { padding: 12px 0; border-bottom: 1px solid #374151; cursor: pointer; color: #d1d5db; }
+    .sidebar li:hover { color: white; }
+    
+    .main-content { margin-left: 250px; padding: 40px; }
+    .dashboard-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
+    
+    .section-card { background: var(--surface); padding: 25px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 30px; }
+    .section-card h3 { margin-top: 0; border-bottom: 2px solid var(--bg); padding-bottom: 10px; }
+    
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+    th, td { text-align: left; padding: 12px; border-bottom: 1px solid #e5e7eb; }
+    th { color: #6b7280; font-weight: 600; text-transform: uppercase; font-size: 0.85rem; }
+    
+    .badge { padding: 4px 8px; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+    .badge.pending { background: #fef08a; color: #854d0e; }
+    .badge.live { background: #bbf7d0; color: #166534; }
+    
+    button { border: none; padding: 8px 14px; border-radius: 5px; cursor: pointer; font-weight: 500; font-size: 0.85rem; transition: opacity 0.2s; }
+    button:hover { opacity: 0.9; }
+    .btn-approve { background: var(--success); color: white; }
+    .btn-revoke { background: var(--danger); color: white; }
+  </style>
+</head>
+<body>
+
+  <div class="sidebar">
+    <h2>Rams Dough</h2>
+    <ul>
+      <li>Dashboard Overview</li>
+      <li>Store Approvals</li>
+      <li>Product Management</li>
+      <li>Settings</li>
+    </ul>
+  </div>
+
+  <div class="main-content">
+    <div class="dashboard-header">
+      <h1>Super Admin Dashboard</h1>
+    </div>
+
+    <!-- PENDING STORES SECTION -->
+    <div class="section-card">
+      <h3>Pending Approvals</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Store Name</th>
+            <th>Description</th>
+            <th>Registered</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="pending-table-body">
+          <tr><td colspan="5">Loading pending stores...</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- LIVE STORES SECTION -->
+    <div class="section-card">
+      <h3>Live Marketplace Stores</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Store Name</th>
+            <th>Products Count</th>
+            <th>Shipping Model</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="live-table-body">
+          <tr><td colspan="5">Loading live stores...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    // Fetch all stores from the admin route
+    async function fetchAdminDashboard() {
+      try {
+        const response = await fetch('/api/admin/stores');
+        const stores = await response.json();
+        
+        const pendingBody = document.getElementById('pending-table-body');
+        const liveBody = document.getElementById('live-table-body');
+        
+        pendingBody.innerHTML = '';
+        liveBody.innerHTML = '';
+
+        let pendingCount = 0;
+        let liveCount = 0;
+
+        stores.forEach(store => {
+          const date = new Date(store.createdAt).toLocaleDateString();
+          
+          if (!store.isApproved) {
+            // Render to Pending Table
+            pendingCount++;
+            pendingBody.innerHTML += `
+              <tr>
+                <td><strong>${store.storeName}</strong></td>
+                <td>${store.description.substring(0, 50)}...</td>
+                <td>${date}</td>
+                <td><span class="badge pending">Pending</span></td>
+                <td>
+                  <button class="btn-approve" onclick="toggleStoreStatus('${store._id}', 'approve')">Approve Store</button>
+                </td>
+              </tr>
+            `;
+          } else {
+            // Render to Live Table
+            liveCount++;
+            liveBody.innerHTML += `
+              <tr>
+                <td><strong>${store.storeName}</strong></td>
+                <td>${store.products.length} Items</td>
+                <td>Nationwide Scheduled</td>
+                <td><span class="badge live">Live on Site</span></td>
+                <td>
+                  <button class="btn-revoke" onclick="toggleStoreStatus('${store._id}', 'revoke')">Suspend</button>
+                </td>
+              </tr>
+            `;
+          }
+        });
+
+        if (pendingCount === 0) pendingBody.innerHTML = '<tr><td colspan="5">No pending approvals.</td></tr>';
+        if (liveCount === 0) liveBody.innerHTML = '<tr><td colspan="5">No stores are currently live.</td></tr>';
+
+      } catch (error) {
+        console.error('Error fetching dashboard data:', error);
+      }
+    }
+
+    // Toggle store approval status
+    async function toggleStoreStatus(storeId, action) {
+      const confirmMsg = action === 'approve' 
+        ? "Approve this store to go live on Rams Dough?" 
+        : "Suspend this store? It will be removed from the marketplace immediately.";
+        
+      if (!confirm(confirmMsg)) return;
+
+      try {
+        const response = await fetch(`/api/admin/stores/${storeId}/${action}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' }
+        });
+
+        if (response.ok) {
+          // Reload the dashboard to reflect changes
+          fetchAdminDashboard();
+        } else {
+          alert('Failed to update store status.');
+        }
+      } catch (error) {
+        alert('Network error. Check server console.');
+      }
+    }
+
+    // Initialize Dashboard
+    fetchAdminDashboard();
+  </script>
+</body>
+</html>
+
