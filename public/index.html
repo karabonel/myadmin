@@ -1,182 +1,215 @@
-<!-- public/index.html (Super Admin Dashboard) -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Super Admin | Rams Dough</title>
-  <style>
-    :root { --bg: #f3f4f6; --surface: #ffffff; --primary: #111827; --accent: #2563eb; --success: #16a34a; --danger: #dc2626; }
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background: var(--bg); color: var(--primary); }
-    
-    .sidebar { width: 250px; background: var(--primary); color: white; height: 100vh; position: fixed; padding: 20px; box-sizing: border-box; }
-    .sidebar h2 { margin-top: 0; font-size: 1.5rem; letter-spacing: 0.5px; border-bottom: 1px solid #374151; padding-bottom: 15px; }
-    .sidebar ul { list-style: none; padding: 0; }
-    .sidebar li { padding: 12px 0; border-bottom: 1px solid #374151; cursor: pointer; color: #d1d5db; }
-    .sidebar li:hover { color: white; }
-    
-    .main-content { margin-left: 250px; padding: 40px; }
-    .dashboard-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 30px; }
-    
-    .section-card { background: var(--surface); padding: 25px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 30px; }
-    .section-card h3 { margin-top: 0; border-bottom: 2px solid var(--bg); padding-bottom: 10px; }
-    
-    table { width: 100%; border-collapse: collapse; margin-top: 15px; }
-    th, td { text-align: left; padding: 12px; border-bottom: 1px solid #e5e7eb; }
-    th { color: #6b7280; font-weight: 600; text-transform: uppercase; font-size: 0.85rem; }
-    
-    .badge { padding: 4px 8px; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
-    .badge.pending { background: #fef08a; color: #854d0e; }
-    .badge.live { background: #bbf7d0; color: #166534; }
-    
-    button { border: none; padding: 8px 14px; border-radius: 5px; cursor: pointer; font-weight: 500; font-size: 0.85rem; transition: opacity 0.2s; }
-    button:hover { opacity: 0.9; }
-    .btn-approve { background: var(--success); color: white; }
-    .btn-revoke { background: var(--danger); color: white; }
-  </style>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>BCM FoodHub | Super Admin Portal</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;900&display=swap" rel="stylesheet"/>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--accent:#a855f7;--bg:#09090b;--card:#18181b;--line:#27272a;--muted:#a1a1aa;--ink:#fff}
+body{font-family:'Inter',sans-serif;background:#000;color:#fff}
+#root{max-width:1400px;margin:0 auto;background:var(--bg);min-height:100vh;display:flex}
+.sidebar{width:280px;background:#0f0f10;border-right:1px solid var(--line);padding:20px;position:sticky;top:0;height:100vh;overflow-y:auto}
+.main{flex:1;padding:22px;overflow-y:auto}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:16px}
+.input,select,textarea{width:100%;background:#000;border:1px solid var(--line);color:#fff;padding:9px 12px;border-radius:10px;font-size:12px;outline:none}
+.btn{padding:8px 14px;border-radius:10px;font-weight:700;font-size:12px;border:none;cursor:pointer}
+.btn-primary{background:#fff;color:#000}
+.btn-accent{background:var(--accent);color:#fff}
+.btn-ghost{background:var(--line);color:#fff}
+.btn-danger{background:#ef4444;color:#fff}
+.side-link{width:100%;padding:10px 12px;border-radius:10px;background:none;border:none;color:var(--muted);text-align:left;font-weight:600;font-size:13px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;margin-bottom:2px}
+.side-link.active{background:var(--card);color:#fff;border:1px solid var(--line)}
+.grid-4{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.badge{font-size:10px;font-weight:800;padding:3px 8px;border-radius:999px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}
+th{color:var(--muted);font-size:11px;text-transform:uppercase}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:100;display:flex;align-items:center;justify-content:center;padding:20px}
+.modal-card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:18px;width:100%;max-width:560px;max-height:90vh;overflow-y:auto}
+@media(max-width:900px){#root{flex-direction:column}.sidebar{width:100%;height:auto;position:relative}.grid-4,.grid-3{grid-template-columns:1fr 1fr}}
+</style>
 </head>
 <body>
+<div id="root"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.6/babel.min.js"></script>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect } = React;
+const api=(p,opts={})=>{
+  const token=localStorage.getItem('super_token');
+  const h={'Content-Type':'application/json', ...(opts.headers||{})};
+  if(token) h['Authorization']='Bearer '+token;
+  return fetch(p,{...opts,headers:h}).then(async r=>{ const j=await r.json().catch(()=>({})); if(!r.ok) throw new Error(j.error||'Failed'); return j; });
+};
 
-  <div class="sidebar">
-    <h2>Rams Dough</h2>
-    <ul>
-      <li>Dashboard Overview</li>
-      <li>Store Approvals</li>
-      <li>Product Management</li>
-      <li>Settings</li>
-    </ul>
-  </div>
+function App(){
+  const [token,setToken]=useState(()=>localStorage.getItem('super_token'));
+  const [stats,setStats]=useState(null);
+  const [tab,setTab]=useState('dashboard');
+  const [stores,setStores]=useState([]);
+  const [users,setUsers]=useState([]);
+  const [categories,setCategories]=useState([]);
+  const [collections,setCollections]=useState([]);
+  const [orders,setOrders]=useState([]);
+  const [payouts,setPayouts]=useState([]);
+  const [coupons,setCoupons]=useState([]);
+  const [tickets,setTickets]=useState([]);
+  const [settings,setSettings]=useState([]);
+  const [cms,setCms]=useState([]);
 
-  <div class="main-content">
-    <div class="dashboard-header">
-      <h1>Super Admin Dashboard</h1>
+  useEffect(()=>{ if(token) localStorage.setItem('super_token',token); else localStorage.removeItem('super_token'); },[token]);
+
+  const loadAll=async()=>{
+    if(!token) return;
+    try{
+      const s=await api('/api/stats'); setStats(s);
+      setStores(await api('/api/stores')); setUsers(await api('/api/users')); setCategories(await api('/api/categories')); setCollections(await api('/api/collections')); setOrders(await api('/api/orders')); setPayouts(await api('/api/payouts')); setCoupons(await api('/api/coupons')); setTickets(await api('/api/support')); setSettings(await api('/api/settings')); setCms(await api('/api/cms'));
+    }catch(e){ console.error(e); }
+  };
+  useEffect(()=>{ loadAll(); },[token]);
+
+  if(!token){
+    const Login=()=>{
+      const [email,setEmail]=useState('admin@bcmfoodhub.co.za');
+      const [pw,setPw]=useState('admin123');
+      const submit=async(e)=>{
+        e.preventDefault();
+        try{ const res=await api('/api/auth/login',{ method:'POST', body: JSON.stringify({ email, password: pw })}); setToken(res.token); }catch(err){ alert(err.message); }
+      };
+      return (
+        <div style={{display:'flex',alignItems:'center',justifyContent:'center',width:'100%',minHeight:'100vh'}}>
+          <div className="card" style={{width:360}}><h2 style={{fontWeight:900}}>Super Admin Login</h2><p style={{fontSize:11,color:'#a1a1aa',marginTop:4}}>Approve stores, commissions, payouts, CMS, platform settings</p>
+          <form onSubmit={submit} style={{display:'flex',flexDirection:'column',gap:8,marginTop:12}}><input className="input" value={email} onChange={e=>setEmail(e.target.value)}/><input className="input" type="password" value={pw} onChange={e=>setPw(e.target.value)}/><button className="btn btn-primary">Login</button></form>
+          <p style={{fontSize:11,color:'#71717a',marginTop:8}}>Default: admin@bcmfoodhub.co.za / admin123</p></div>
+        </div>
+      );
+    };
+    return <Login/>;
+  }
+
+  const Dashboard=()=>(
+    !stats? <div>Loading...</div> :
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}><h1 style={{fontWeight:900,fontSize:22}}>Platform Overview</h1><button className="btn btn-ghost" onClick={()=> { setToken(null); location.reload(); }}>Logout</button></div>
+      <div className="grid-4" style={{marginTop:16}}>
+        <div className="card"><div style={{fontSize:11,color:'#a1a1aa'}}>Total Stores</div><div style={{fontWeight:900,fontSize:20}}>{stats.totalStores} <span style={{fontSize:11,background:'#f59e0b',color:'#000',padding:'2px 6px',borderRadius:6}}>{stats.pendingVerification} pending</span></div><div style={{fontSize:11,marginTop:4}}>{stats.activeStores} active • {stats.featuredStores} featured</div></div>
+        <div className="card"><div style={{fontSize:11,color:'#a1a1aa'}}>Users</div><div style={{fontWeight:900,fontSize:20}}>{stats.totalUsers} customers</div><div style={{fontSize:11,marginTop:4}}>{stats.totalStoreAdmins} store admins</div></div>
+        <div className="card"><div style={{fontSize:11,color:'#a1a1aa'}}>Orders & Revenue</div><div style={{fontWeight:900,fontSize:20}}>R{stats.totalRevenue.toFixed(0)}</div><div style={{fontSize:11,marginTop:4}}>{stats.totalOrders} orders • {stats.pendingOrders} paid pending</div></div>
+        <div className="card"><div style={{fontSize:11,color:'#a1a1aa'}}>Commission avg / Tickets</div><div style={{fontWeight:900,fontSize:20}}>{stats.avgCommission.toFixed(1)}% avg</div><div style={{fontSize:11,marginTop:4}}>{stats.openTickets} open support tickets</div></div>
+      </div>
+      <div className="grid-3" style={{marginTop:12}}>
+        <div className="card"><h4 style={{fontWeight:800,fontSize:13}}>Revenue last 7 of 30</h4><div style={{display:'flex',gap:6,alignItems:'end',marginTop:10}}>{stats.last30.slice(-7).map(d=> <div key={d.date} style={{flex:1,textAlign:'center'}}><div style={{height: Math.max(6, d.revenue/20+4), background:'#a855f7', borderRadius:6}}></div><div style={{fontSize:9,marginTop:4}}>{d.date.slice(5)}<br/>R{d.revenue}</div></div>)}</div></div>
+        <div className="card"><h4 style={{fontWeight:800,fontSize:13}}>Top Stores by Orders</h4>{stats.topStores.map(s=> <div key={s.id} style={{display:'flex',justifyContent:'space-between',fontSize:12,padding:'6px 0',borderBottom:'1px solid #27272a'}}><span>{s.name}</span><span>{s.totalOrders} orders</span></div>)}</div>
+        <div className="card"><h4 style={{fontWeight:800,fontSize:13}}>Quick Actions</h4>
+          <div style={{display:'flex',flexDirection:'column',gap:6,marginTop:8}}>
+            <button className="btn btn-accent" onClick={()=>setTab('stores')}>Review {stats.pendingVerification} pending stores</button>
+            <button className="btn btn-ghost" onClick={()=>setTab('payouts')}>Payouts • {payouts.length} stores</button>
+            <button className="btn btn-ghost" onClick={()=> window.open('/api/reports/orders/csv','_blank')}>Export Orders CSV</button>
+            <button className="btn btn-ghost" onClick={()=>setTab('support')}>Support: {stats.openTickets} open</button>
+          </div>
+        </div>
+      </div>
     </div>
+  );
 
-    <!-- PENDING STORES SECTION -->
-    <div class="section-card">
-      <h3>Pending Approvals</h3>
-      <table>
-        <thead>
-          <tr>
-            <th>Store Name</th>
-            <th>Description</th>
-            <th>Registered</th>
-            <th>Status</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody id="pending-table-body">
-          <tr><td colspan="5">Loading pending stores...</td></tr>
-        </tbody>
-      </table>
+  const StoresTab=()=>{
+    const [filter,setFilter]=useState('');
+    const filtered=stores.filter(s=> !filter || (filter==='pending' && !s.verified) || (filter==='featured' && s.featured) || (filter==='active' && s.active));
+    return (
+      <div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}><h2 style={{fontWeight:900}}>Stores • Approve / Suspend / Feature</h2><select className="input" style={{width:180}} value={filter} onChange={e=>setFilter(e.target.value)}><option value="">All</option><option value="pending">Pending verification</option><option value="active">Active</option><option value="featured">Featured</option></select></div>
+        <div className="card" style={{padding:0,marginTop:12,overflow:'hidden'}}>
+          <table><thead><tr><th>Store</th><th>Owner / City</th><th>Prep+Ship</th><th>Status</th><th>Commission</th><th>Actions</th></tr></thead><tbody>
+            {filtered.map(s=>(
+              <tr key={s.id}><td><b>{s.name}</b><br/><small style={{color:'#a1a1aa'}}>{s.id} • {s.shippingRegions?.join(', ')}</small></td><td>{s.ownerId?.email||s.email}<br/><small>{s.city}, {s.province}</small></td><td>{s.preparationDays}d + {s.shippingDays}d<br/><small>Min R{s.minOrder}</small></td><td>{s.verified? (s.active? <span className="badge" style={{background:'#22c55e',color:'#000'}}>Verified</span> : <span className="badge" style={{background:'#ef4444'}}>Suspended</span>) : <span className="badge" style={{background:'#f59e0b',color:'#000'}}>Pending</span>} {s.featured&&<span className="badge" style={{background:'#a855f7'}}>Featured</span>}</td><td>{s.commissionRate}%<br/><small>R • {s.totalOrders||0} orders</small></td><td><div style={{display:'flex',gap:4,flexWrap:'wrap'}}><button className="btn btn-accent" style={{padding:'4px 8px'}} onClick={async()=>{ await api('/api/stores/'+s.id+'/verify',{method:'PUT'}); loadAll();}}>Approve</button><button className="btn btn-ghost" style={{padding:'4px 8px'}} onClick={async()=>{ await api('/api/stores/'+s.id+'/feature',{method:'PUT'}); loadAll();}}>{s.featured?'Unfeature':'Feature'}</button><button className="btn btn-ghost" style={{padding:'4px 8px'}} onClick={async()=>{ if(s.active){ await api('/api/stores/'+s.id+'/suspend',{method:'PUT'}); } else { await api('/api/stores/'+s.id+'/activate',{method:'PUT'}); } loadAll();}}>{s.active?'Suspend':'Activate'}</button><button className="btn btn-ghost" style={{padding:'4px 8px'}} onClick={async()=>{ const rate=prompt('Commission %',s.commissionRate); if(rate){ await api('/api/stores/'+s.id+'/commission',{method:'PUT',body:JSON.stringify({commissionRate:Number(rate)})}); loadAll(); }}}>Comm</button></div></td></tr>
+            ))}
+          </tbody></table>
+        </div>
+      </div>
+    );
+  };
+
+  const UsersTab=()=>(
+    <div><h2 style={{fontWeight:900}}>Users & Roles</h2><div className="card" style={{padding:0,marginTop:12}}><table><thead><tr><th>Name</th><th>Email / Phone</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead><tbody>{users.map(u=>(
+      <tr key={u._id}><td>{u.name}</td><td>{u.email}<br/><small>{u.phone||''}</small></td><td><span className="badge" style={{background:u.role==='super_admin'?'#a855f7': u.role==='store_admin'?'#f59e0b':'#27272a',color:u.role==='store_admin'?'#000':'#fff'}}>{u.role}</span></td><td><small>{new Date(u.createdAt).toLocaleDateString()}</small></td><td><div style={{display:'flex',gap:4}}><select className="input" style={{width:120}} value={u.role} onChange={async(e)=>{ await api('/api/users/'+u._id,{method:'PUT',body:JSON.stringify({role:e.target.value})}); loadAll(); }}><option value="customer">customer</option><option value="store_admin">store_admin</option><option value="super_admin">super_admin</option></select><button className="btn btn-danger" style={{padding:'4px 8px'}} onClick={async()=>{ if(confirm('Delete user?')){ await api('/api/users/'+u._id,{method:'DELETE'}); loadAll(); }}}>Del</button></div></td></tr>
+    ))}</tbody></table></div></div>
+  );
+
+  const CategoriesTab=()=>{
+    const [name,setName]=useState(''); const [img,setImg]=useState('');
+    const add=async()=>{ await api('/api/categories',{method:'POST',body:JSON.stringify({name, image: img, featured:false})}); setName(''); setImg(''); loadAll(); };
+    return (<div><h2 style={{fontWeight:900}}>Categories • Global</h2><div className="card" style={{display:'flex',gap:8,marginTop:12}}><input className="input" placeholder="Category name" value={name} onChange={e=>setName(e.target.value)}/><input className="input" placeholder="Image URL" value={img} onChange={e=>setImg(e.target.value)}/><button className="btn btn-accent" onClick={add}>Add</button></div><div className="grid-3" style={{marginTop:12}}>{categories.map(c=> <div key={c._id} className="card"><b>{c.name}</b><br/><small style={{color:'#a1a1aa'}}>{c.slug}</small><div style={{marginTop:8,display:'flex',gap:4}}><button className="btn btn-ghost" style={{padding:'4px 8px'}} onClick={async()=>{ const n=prompt('Rename',c.name); if(n){ await api('/api/categories/'+c._id,{method:'PUT',body:JSON.stringify({name:n})}); loadAll(); }}}>Edit</button><button className="btn btn-danger" style={{padding:'4px 8px'}} onClick={async()=>{ await api('/api/categories/'+c._id,{method:'DELETE'}); loadAll();}}>Del</button></div></div>)}</div></div>);
+  };
+
+  const CollectionsTab=()=>{
+    const [name,setName]=useState(''); const [type,setType]=useState('curated');
+    const add=async()=>{ await api('/api/collections',{method:'POST',body:JSON.stringify({name, type, image:'https://images.unsplash.com/photo-1504674900247-0877df9cc836?q=80&w=800', featured:true})}); setName(''); loadAll(); };
+    return (<div><h2 style={{fontWeight:900}}>Featured Collections • Curated • Seasonal • Corporate Gifts</h2><div className="card" style={{display:'flex',gap:8,marginTop:12}}><input className="input" placeholder="Collection name" value={name} onChange={e=>setName(e.target.value)}/><select className="input" style={{width:160}} value={type} onChange={e=>setType(e.target.value)}><option value="curated">curated</option><option value="featured">featured</option><option value="seasonal">seasonal</option><option value="promotional">promotional</option></select><button className="btn btn-accent" onClick={add}>Create</button></div><div style={{marginTop:12,display:'flex',flexDirection:'column',gap:8}}>{collections.map(c=> <div key={c._id} className="card" style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}><div><b>{c.name}</b> • {c.type} • <small style={{color:'#a1a1aa'}}>{c.slug}</small><br/><small>{c.productIds?.length} products • {c.storeIds?.length} stores • {c.featured?'Featured':''}</small></div><div style={{display:'flex',gap:4}}><button className="btn btn-ghost" style={{padding:'4px 8px'}} onClick={async()=>{ await api('/api/collections/'+c._id,{method:'PUT',body:JSON.stringify({featured:!c.featured})}); loadAll();}}>{c.featured?'Unfeature':'Feature'}</button><button className="btn btn-danger" style={{padding:'4px 8px'}} onClick={async()=>{ await api('/api/collections/'+c._id,{method:'DELETE'}); loadAll();}}>Del</button></div></div>)}</div></div>);
+  };
+
+  const PayoutsTab=()=>(
+    <div><h2 style={{fontWeight:900}}>Commission Reports & Payout Management</h2><p style={{fontSize:11,color:'#a1a1aa',marginTop:4}}>Default 12% • Per-store revenue calculated from order items • Export reports (future: WhatsApp/email notifications)</p><div className="card" style={{padding:0,marginTop:12,overflow:'hidden'}}><table><thead><tr><th>Store</th><th>Orders</th><th>Revenue</th><th>Rate</th><th>Commission</th><th>Payout to Store</th></tr></thead><tbody>{payouts.map(p=> <tr key={p.storeId}><td><b>{p.storeName}</b><br/><small>{p.storeId}</small></td><td>{p.totalOrders}</td><td>R{p.storeRevenue.toFixed(0)}</td><td>{p.commissionRate}%</td><td style={{color:'#f59e0b'}}>R{p.commission.toFixed(0)}</td><td style={{color:'#22c55e',fontWeight:800}}>R{p.payout.toFixed(0)}</td></tr>)}</tbody></table></div></div>
+  );
+
+  const SupportTab=()=>(
+    <div><h2 style={{fontWeight:900}}>Support Tickets • Platform & Store orders</h2><div style={{display:'flex',flexDirection:'column',gap:8,marginTop:12}}>{tickets.map(t=> <div key={t._id} className="card"><div style={{display:'flex',justifyContent:'space-between'}}><b>{t.subject}</b><span className="badge" style={{background: t.status==='open'?'#ef4444':'#22c55e'}}>{t.status} • {t.priority||'medium'}</span></div><div style={{fontSize:12,color:'#a1a1aa',marginTop:4}}>{t.userId?.email||t.userId} • Store {t.storeId||'platform'} • {new Date(t.createdAt).toLocaleString()}</div><div style={{fontSize:12,marginTop:6}}>{t.message}</div>{t.responses?.map((r,i)=> <div key={i} style={{marginTop:6,padding:8,background:'#000',borderRadius:8,border:'1px solid #27272a',fontSize:12}}><b>{r.sender}:</b> {r.message}</div>)}<div style={{display:'flex',gap:6,marginTop:8}}><input id={'resp-'+t._id} className="input" placeholder="Reply..."/><button className="btn btn-accent" onClick={async()=>{ const msg=document.getElementById('resp-'+t._id).value; await api('/api/support/'+t._id,{method:'PUT',body:JSON.stringify({response:msg})}); loadAll(); }}>Reply</button><select className="input" style={{width:120}} onChange={async(e)=>{ await api('/api/support/'+t._id,{method:'PUT',body:JSON.stringify({status:e.target.value})}); loadAll(); }}><option>open</option><option>pending</option><option>resolved</option><option>closed</option></select></div></div>)}</div></div>
+  );
+
+  const SettingsTab=()=>{
+    const [k,setK]=useState(''); const [v,setV]=useState(''); const [d,setD]=useState('');
+    const save=async()=>{ let parsed=v; try{ parsed=JSON.parse(v); }catch{}; await api('/api/settings',{method:'PUT',body:JSON.stringify({key:k, value: parsed, description:d})}); setK(''); setV(''); setD(''); loadAll(); };
+    return (<div><h2 style={{fontWeight:900}}>Platform Settings & CMS Pages</h2><p style={{fontSize:11,color:'#a1a1aa'}}>Future: referral system, loyalty points, gift cards, subscriptions, shipping labels, email/WhatsApp notifications, analytics exports</p>
+      <div className="card" style={{marginTop:12}}><h4>New Setting / CMS Page</h4><div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:8}}><input className="input" placeholder="key e.g. deliveryFee or cms_about" value={k} onChange={e=>setK(e.target.value)}/><input className="input" placeholder="value (JSON or string)" value={v} onChange={e=>setV(e.target.value)}/><input className="input" placeholder="description" value={d} onChange={e=>setD(e.target.value)} style={{gridColumn:'1/-1'}}/><button className="btn btn-accent" onClick={save} style={{gridColumn:'1/-1'}}>Save Setting</button></div></div>
+      <div className="grid-3" style={{marginTop:12}}>{settings.map(s=> <div key={s.key} className="card"><b>{s.key}</b><br/><small style={{color:'#a1a1aa'}}>{s.description||''}</small><div style={{marginTop:6,fontSize:11,background:'#000',padding:8,borderRadius:8,wordBreak:'break-all'}}>{JSON.stringify(s.value)}</div><button className="btn btn-danger" style={{marginTop:6,padding:'4px 8px'}} onClick={async()=>{ await api('/api/settings/'+s.key,{method:'DELETE'}); loadAll();}}>Delete</button></div>)}</div>
+      <div className="card" style={{marginTop:12}}><h4>CMS Pages (cms_*)</h4>{cms.map(c=> <div key={c.key} style={{padding:'6px 0',borderBottom:'1px solid #27272a',fontSize:12}}><b>{c.key}</b> - {c.description}: {typeof c.value==='string'? c.value.slice(0,120): JSON.stringify(c.value).slice(0,120)}</div>)}</div>
+    </div>);
+  };
+
+  return (
+    <div style={{display:'flex',width:'100%'}}>
+      <div className="sidebar">
+        <div style={{fontWeight:900,fontSize:20}}>BCM Super Admin</div><div style={{fontSize:11,color:'#a1a1aa',marginTop:4}}>Nationwide marketplace • Goldbelly-style</div>
+        <div style={{marginTop:18,display:'flex',flexDirection:'column'}}>
+          {[
+            {id:'dashboard',label:'Dashboard',icon:'📊'},
+            {id:'stores',label:'Stores Approve/Suspend',count: stores.filter(s=>!s.verified).length},
+            {id:'users',label:'Users & Roles',count: users.length},
+            {id:'orders',label:'Orders & Reports',count: orders.length},
+            {id:'payouts',label:'Commissions & Payouts',count: payouts.length},
+            {id:'categories',label:'Categories',count: categories.length},
+            {id:'collections',label:'Featured Collections',count: collections.length},
+            {id:'coupons',label:'Coupons Global',count: coupons.length},
+            {id:'support',label:'Support Tickets',count: tickets.filter(t=>t.status==='open').length},
+            {id:'settings',label:'Settings • CMS • Future',count: settings.length},
+          ].map(it=>(
+            <button key={it.id} className={'side-link'+(tab===it.id?' active':'')} onClick={()=>setTab(it.id)}><span>{it.icon} {it.label}</span>{it.count? <span style={{background:'#a855f7',color:'#fff',padding:'2px 7px',borderRadius:999,fontSize:11}}>{it.count}</span>:null}</button>
+          ))}
+          <div style={{marginTop:16,padding:10,background:'#000',borderRadius:12,border:'1px solid #27272a',fontSize:10,lineHeight:1.5,color:'#a1a1aa'}}>
+            Order lifecycle: Pending Payment → Paid → Confirmed → Preparing → Packed → Shipped → In Transit → Delivered → Completed • Cancelled • Refunded<br/><br/>
+            PayFast only • Orders after ITN • Future: referral, loyalty points, gift cards, subscriptions, shipping labels, WhatsApp/email, export reports
+          </div>
+        </div>
+      </div>
+      <div className="main">
+        {tab==='dashboard' && <Dashboard/>}
+        {tab==='stores' && <StoresTab/>}
+        {tab==='users' && <UsersTab/>}
+        {tab==='orders' && <div><h2 style={{fontWeight:900}}>Orders • All stores • Reports</h2><div className="card" style={{padding:0,marginTop:12}}><table><thead><tr><th>Order #</th><th>Customer</th><th>Total</th><th>Status</th><th>Date</th><th>Ship Date</th></tr></thead><tbody>{orders.slice(0,100).map(o=> <tr key={o._id}><td>{o.orderNumber}</td><td>{o.userId?.email||o.userId}<br/><small>{o.items?.length} items</small></td><td>R{o.total}</td><td><span className="badge" style={{background:'#27272a'}}>{o.status}</span></td><td><small>{new Date(o.createdAt).toLocaleDateString()}</small></td><td><small>{o.scheduledShippingDate? new Date(o.scheduledShippingDate).toLocaleDateString():''} {o.giftOrder?'🎁':''}</small></td></tr>)}</tbody></table></div></div>}
+        {tab==='payouts' && <PayoutsTab/>}
+        {tab==='categories' && <CategoriesTab/>}
+        {tab==='collections' && <CollectionsTab/>}
+        {tab==='coupons' && <div><h2 style={{fontWeight:900}}>Global Coupons</h2><div style={{marginTop:12,display:'flex',flexDirection:'column',gap:8}}>{coupons.map(c=> <div key={c._id} className="card" style={{display:'flex',justifyContent:'space-between'}}><span><b>{c.code}</b> {c.discountValue}{c.discountType==='percent'?'%':'R'} • store: {c.storeId||'platform'} • used {c.usedCount}/{c.maxUses}</span><button className="btn btn-danger" style={{padding:'4px 8px'}} onClick={async()=>{ await api('/api/coupons/'+c._id,{method:'DELETE'}); loadAll();}}>Del</button></div>)}</div></div>}
+        {tab==='support' && <SupportTab/>}
+        {tab==='settings' && <SettingsTab/>}
+      </div>
     </div>
-
-    <!-- LIVE STORES SECTION -->
-    <div class="section-card">
-      <h3>Live Marketplace Stores</h3>
-      <table>
-        <thead>
-          <tr>
-            <th>Store Name</th>
-            <th>Products Count</th>
-            <th>Shipping Model</th>
-            <th>Status</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody id="live-table-body">
-          <tr><td colspan="5">Loading live stores...</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <script>
-    // Fetch all stores from the admin route
-    async function fetchAdminDashboard() {
-      try {
-        const response = await fetch('/api/admin/stores');
-        const stores = await response.json();
-        
-        const pendingBody = document.getElementById('pending-table-body');
-        const liveBody = document.getElementById('live-table-body');
-        
-        pendingBody.innerHTML = '';
-        liveBody.innerHTML = '';
-
-        let pendingCount = 0;
-        let liveCount = 0;
-
-        stores.forEach(store => {
-          const date = new Date(store.createdAt).toLocaleDateString();
-          
-          if (!store.isApproved) {
-            // Render to Pending Table
-            pendingCount++;
-            pendingBody.innerHTML += `
-              <tr>
-                <td><strong>${store.storeName}</strong></td>
-                <td>${store.description.substring(0, 50)}...</td>
-                <td>${date}</td>
-                <td><span class="badge pending">Pending</span></td>
-                <td>
-                  <button class="btn-approve" onclick="toggleStoreStatus('${store._id}', 'approve')">Approve Store</button>
-                </td>
-              </tr>
-            `;
-          } else {
-            // Render to Live Table
-            liveCount++;
-            liveBody.innerHTML += `
-              <tr>
-                <td><strong>${store.storeName}</strong></td>
-                <td>${store.products.length} Items</td>
-                <td>Nationwide Scheduled</td>
-                <td><span class="badge live">Live on Site</span></td>
-                <td>
-                  <button class="btn-revoke" onclick="toggleStoreStatus('${store._id}', 'revoke')">Suspend</button>
-                </td>
-              </tr>
-            `;
-          }
-        });
-
-        if (pendingCount === 0) pendingBody.innerHTML = '<tr><td colspan="5">No pending approvals.</td></tr>';
-        if (liveCount === 0) liveBody.innerHTML = '<tr><td colspan="5">No stores are currently live.</td></tr>';
-
-      } catch (error) {
-        console.error('Error fetching dashboard data:', error);
-      }
-    }
-
-    // Toggle store approval status
-    async function toggleStoreStatus(storeId, action) {
-      const confirmMsg = action === 'approve' 
-        ? "Approve this store to go live on Rams Dough?" 
-        : "Suspend this store? It will be removed from the marketplace immediately.";
-        
-      if (!confirm(confirmMsg)) return;
-
-      try {
-        const response = await fetch(`/api/admin/stores/${storeId}/${action}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' }
-        });
-
-        if (response.ok) {
-          // Reload the dashboard to reflect changes
-          fetchAdminDashboard();
-        } else {
-          alert('Failed to update store status.');
-        }
-      } catch (error) {
-        alert('Network error. Check server console.');
-      }
-    }
-
-    // Initialize Dashboard
-    fetchAdminDashboard();
-  </script>
-</body>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a2005b0298512fad',t:'MTc4NDg2OTE2Ng=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
-
