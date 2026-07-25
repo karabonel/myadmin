@@ -101,6 +101,12 @@ const OrderSchema = new mongoose.Schema({
 }, { strict: false });
 const Order = mongoose.models.Order || mongoose.model('Order', OrderSchema);
 
+const ReviewSchema = new mongoose.Schema({ userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, productId: String, storeId: String, rating: Number, title: String, comment: String, approved: { type: Boolean, default: true }, storeReply: mongoose.Schema.Types.Mixed, reportedByStore: mongoose.Schema.Types.Mixed, createdAt: { type: Date, default: Date.now } }, { strict: false });
+const Review = mongoose.models.Review || mongoose.model('Review', ReviewSchema);
+
+const PayoutSchema = new mongoose.Schema({ storeId: String, storeName: String, periodFrom: Date, periodTo: Date, grossSales: Number, commissionRate: Number, commissionAmount: Number, payoutAmount: Number, status: { type: String, default: 'pending' }, paidAt: Date, reference: String, createdAt: { type: Date, default: Date.now } }, { strict: false });
+const Payout = mongoose.models.Payout || mongoose.model('Payout', PayoutSchema);
+
 const NotificationSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, storeId: String, type: String,
   title: String, message: String, link: String, read: { type: Boolean, default: false }, createdAt: { type: Date, default: Date.now }
@@ -188,16 +194,22 @@ app.put('/api/auth/password', adminAuth, async (req, res) => {
 
 // --------------------- DASHBOARD ---------------------
 app.get('/api/admin/dashboard', adminAuth, async (req, res) => {
-  const now = new Date(); const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-  const [pendingStores, approvedStores, products, customers, openTickets, paidOrders, recentOrders, pendingList, revenue] = await Promise.all([
-    Store.countDocuments({ approvalStatus: 'pending' }), Store.countDocuments({ approvalStatus: 'approved', active: true }),
-    Product.countDocuments({ active: true }), User.countDocuments({ role: 'customer', isActive: true }),
-    SupportTicket.countDocuments({ status: { $in: ['open','pending'] } }), Order.countDocuments({ paymentStatus: 'paid' }),
-    Order.find({}).sort({ createdAt: -1 }).limit(6).populate('userId', 'name email'),
-    Store.find({ approvalStatus: 'pending' }).sort({ submittedAt: 1 }).limit(6).populate('ownerId', 'name email'),
-    Order.aggregate([{ $match: { paymentStatus: 'paid', createdAt: { $gte: monthStart } } }, { $group: { _id: null, total: { $sum: '$total' } } }])
+  const now = new Date(); const monthStart = new Date(now.getFullYear(), now.getMonth(), 1); const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const [stores, products, customers, openTickets, paidOrderDocs, recentOrders, pendingList, payouts, newRegistrations] = await Promise.all([
+    Store.find({}), Product.find({ active: true }), User.countDocuments({ role: 'customer', isActive: true }), SupportTicket.countDocuments({ status: { $in: ['open','pending'] } }),
+    Order.find({ paymentStatus: 'paid' }).sort({ createdAt: -1 }).limit(1000), Order.find({}).sort({ createdAt: -1 }).limit(10).populate('userId', 'name email'),
+    Store.find({ approvalStatus: 'pending' }).sort({ submittedAt: 1 }).limit(6).populate('ownerId', 'name email'), Payout.countDocuments({ status: 'pending' }),
+    User.countDocuments({ createdAt: { $gte: monthStart } })
   ]);
-  res.json({ stats: { pendingStores, approvedStores, products, customers, openTickets, paidOrders, monthlyRevenue: revenue[0]?.total || 0 }, recentOrders, pendingStores: pendingList });
+  const monthOrders = paidOrderDocs.filter(order => new Date(order.createdAt) >= monthStart); const todayOrders = paidOrderDocs.filter(order => new Date(order.createdAt) >= todayStart);
+  const totalSales = monthOrders.reduce((sum, order) => sum + (order.total || 0), 0); const commissionRevenue = monthOrders.reduce((sum, order) => sum + (order.items || []).reduce((inner,item) => { const store = stores.find(s => s.id === item.storeId); return inner + ((item.price || 0) * (item.quantity || 0) * ((store?.commissionRate || 12) / 100)); }, 0), 0);
+  const statusCounts = {}; recentOrders.forEach(order => { statusCounts[order.status] = (statusCounts[order.status] || 0) + 1; });
+  const productPerformance = {}; const storePerformance = {};
+  paidOrderDocs.forEach(order => (order.items || []).forEach(item => { const amount = (item.price || 0) * (item.quantity || 0); productPerformance[item.productId] = productPerformance[item.productId] || { name: item.productName, quantity: 0, revenue: 0 }; productPerformance[item.productId].quantity += item.quantity || 0; productPerformance[item.productId].revenue += amount; storePerformance[item.storeId] = storePerformance[item.storeId] || { name: item.storeName, orders: 0, revenue: 0 }; storePerformance[item.storeId].orders += item.quantity || 0; storePerformance[item.storeId].revenue += amount; }));
+  res.json({
+    stats: { totalSales, todaySales: todayOrders.reduce((sum, order) => sum + (order.total || 0), 0), totalOrders: paidOrderDocs.length, totalCustomers: customers, totalStores: stores.length, pendingStores: stores.filter(store => store.approvalStatus === 'pending').length, pendingPayouts: payouts, commissionRevenue: Math.round(commissionRevenue), newRegistrations, openTickets, products: products.length },
+    statusCounts, bestProducts: Object.values(productPerformance).sort((a,b) => b.quantity - a.quantity).slice(0,5), topStores: Object.values(storePerformance).sort((a,b) => b.revenue - a.revenue).slice(0,5), recentOrders, pendingStores: pendingList
+  });
 });
 
 // --------------------- STORE APPROVAL & MANAGEMENT ---------------------
@@ -228,11 +240,18 @@ app.put('/api/admin/stores/:id', adminAuth, async (req, res) => {
   const store = await Store.findOne({ id: req.params.id }); if (!store) return res.status(404).json({ error: 'Store not found.' });
   const fields = ['name','description','email','phone','address','city','province','logo','banner','shippingCutoffHour'];
   fields.forEach(key => { if (req.body[key] !== undefined) store[key] = clean(req.body[key], key === 'description' ? 2000 : 500); });
-  ['preparationDays','shippingDays','minOrder','commissionRate'].forEach(key => { if (req.body[key] !== undefined) store[key] = Math.max(0, num(req.body[key])); });
+  ['preparationDays','shippingDays','minOrder','commissionRate','rating'].forEach(key => { if (req.body[key] !== undefined) store[key] = Math.max(0, num(req.body[key])); });
   if (req.body.shippingRegions !== undefined) store.shippingRegions = list(req.body.shippingRegions).filter(region => PROVINCES.includes(region) || region === 'Nationwide');
-  ['active','featured'].forEach(key => { if (req.body[key] !== undefined) store[key] = bool(req.body[key]); });
+  ['active','featured','verified'].forEach(key => { if (req.body[key] !== undefined) store[key] = bool(req.body[key]); });
+  ['verificationStatus','verificationNotes','bankVerificationStatus'].forEach(key => { if (req.body[key] !== undefined) store[key] = clean(req.body[key], 1000); });
   if (store.name && store.name !== req.body.originalName) store.slug = await uniqueSlug(Store, store.name, store._id);
   await store.save(); await audit(req, 'update', 'store', store.id, `Updated ${store.name}`); res.json(store);
+});
+
+app.delete('/api/admin/stores/:id', adminAuth, async (req, res) => {
+  const store = await Store.findOne({ id: req.params.id }); if (!store) return res.status(404).json({ error: 'Store not found.' });
+  await Promise.all([Product.deleteMany({ storeId: store.id }), Store.deleteOne({ _id: store._id })]);
+  await audit(req, 'delete', 'store', store.id, `Deleted ${store.name} and its catalogue`); res.json({ ok: true });
 });
 
 // --------------------- PRODUCTS ---------------------
@@ -253,6 +272,11 @@ app.put('/api/admin/products/:id', adminAuth, async (req, res) => {
   ['active','featured','preorder'].forEach(key => { if (req.body[key] !== undefined) product[key] = bool(req.body[key]); });
   if (req.body.images !== undefined) product.images = list(req.body.images).slice(0, 8);
   await product.save(); await audit(req, 'update', 'product', product.id, `Updated ${product.name}`); res.json(product);
+});
+
+app.delete('/api/admin/products/:id', adminAuth, async (req, res) => {
+  const product = await Product.findOneAndDelete({ id: req.params.id }); if (!product) return res.status(404).json({ error: 'Product not found.' });
+  await audit(req, 'delete', 'product', product.id, `Removed ${product.name}`); res.json({ ok: true });
 });
 
 // --------------------- ORDERS ---------------------
@@ -287,6 +311,36 @@ app.put('/api/admin/users/:id/status', adminAuth, async (req, res) => {
   const user = await User.findById(req.params.id); if (!user) return res.status(404).json({ error: 'User not found.' });
   if (String(user._id) === String(req.user._id)) return res.status(400).json({ error: 'You cannot deactivate your own admin account.' });
   user.isActive = bool(req.body.isActive); await user.save(); await audit(req, user.isActive ? 'activate' : 'deactivate', 'user', user._id, `${user.email} ${user.isActive ? 'activated' : 'deactivated'}`); res.json({ _id: user._id, isActive: user.isActive });
+});
+
+// --------------------- PAYOUTS / REVIEWS / ANNOUNCEMENTS ---------------------
+app.get('/api/admin/payouts', adminAuth, async (req, res) => res.json(await Payout.find({}).sort({ createdAt: -1 }).limit(300)));
+app.post('/api/admin/payouts/calculate', adminAuth, async (req, res) => {
+  const store = await Store.findOne({ id: clean(req.body.storeId, 100) }); if (!store) return res.status(404).json({ error: 'Store not found.' });
+  const from = req.body.periodFrom ? new Date(req.body.periodFrom) : new Date(new Date().getFullYear(), new Date().getMonth(), 1); const to = req.body.periodTo ? new Date(req.body.periodTo) : new Date();
+  const orders = await Order.find({ paymentStatus: 'paid', createdAt: { $gte: from, $lte: to }, 'items.storeId': store.id });
+  const grossSales = orders.reduce((sum, order) => sum + (order.items || []).filter(item => item.storeId === store.id).reduce((inner,item) => inner + (item.price || 0) * (item.quantity || 0), 0), 0);
+  const commissionRate = store.commissionRate || 12; const commissionAmount = Math.round(grossSales * commissionRate / 100); const payout = await Payout.create({ storeId: store.id, storeName: store.name, periodFrom: from, periodTo: to, grossSales, commissionRate, commissionAmount, payoutAmount: grossSales - commissionAmount, status: 'pending' });
+  await audit(req, 'calculate', 'payout', payout._id, `Calculated payout for ${store.name}`); res.status(201).json(payout);
+});
+app.put('/api/admin/payouts/:id', adminAuth, async (req, res) => {
+  const payout = await Payout.findById(req.params.id); if (!payout) return res.status(404).json({ error: 'Payout not found.' });
+  const status = clean(req.body.status, 30); if (['pending','approved','paid','failed'].includes(status)) payout.status = status; if (status === 'paid') payout.paidAt = new Date(); if (req.body.reference !== undefined) payout.reference = clean(req.body.reference, 120); await payout.save();
+  await audit(req, 'update', 'payout', payout._id, `Payout ${payout.status}`); res.json(payout);
+});
+app.get('/api/admin/reviews', adminAuth, async (req, res) => res.json(await Review.find({}).populate('userId','name email').sort({ createdAt: -1 }).limit(400)));
+app.put('/api/admin/reviews/:id', adminAuth, async (req, res) => {
+  const review = await Review.findById(req.params.id); if (!review) return res.status(404).json({ error: 'Review not found.' });
+  if (req.body.approved !== undefined) review.approved = bool(req.body.approved); if (req.body.adminResponse !== undefined) review.adminResponse = { message: clean(req.body.adminResponse, 1500), createdAt: new Date(), adminId: req.user._id }; await review.save();
+  await audit(req, 'moderate', 'review', review._id, `Review ${review.approved ? 'approved' : 'hidden'}`); res.json(review);
+});
+app.post('/api/admin/announcements', adminAuth, async (req, res) => {
+  const audience = clean(req.body.audience, 30) || 'customers'; const title = clean(req.body.title, 120); const message = clean(req.body.message, 1200); const storeId = clean(req.body.storeId, 100);
+  if (!title || !message) return res.status(400).json({ error: 'Announcement title and message are required.' });
+  const query = audience === 'stores' ? { role: 'store_admin', isActive: true } : audience === 'all' ? { isActive: true } : { role: 'customer', isActive: true };
+  const users = storeId ? await User.find({ _id: (await Store.findOne({ id: storeId }))?.ownerId, isActive: true }).select('_id') : await User.find(query).select('_id');
+  if (users.length) await Notification.insertMany(users.map(user => ({ userId: user._id, storeId: storeId || undefined, type: 'announcement', title, message, link: '/' })));
+  await audit(req, 'announce', 'notification', storeId || audience, `${title} → ${audience}`); res.json({ ok: true, recipientCount: users.length });
 });
 
 // --------------------- CATEGORIES / COLLECTIONS / PROMOTIONS ---------------------
@@ -395,3 +449,4 @@ mongoose.connect(MONGO_URI).then(async () => {
 }).catch(error => console.error('MongoDB connection error:', error.message));
 
 app.listen(PORT, '0.0.0.0', () => console.log(`🚀 BCM FoodHub Super Admin running at http://localhost:${PORT}`));
+
