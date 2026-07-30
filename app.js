@@ -11,13 +11,34 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.SUPER_ADMIN_PORT || process.env.PORT || 3001;
 const MONGO_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/bcm_food_hub';
-const JWT_SECRET = process.env.SUPER_ADMIN_JWT_SECRET || process.env.JWT_SECRET || 'bcmfoodhub-secret-2024';
-const BOOTSTRAP_USERNAME = (process.env.SUPER_ADMIN_USERNAME || 'karabo').trim().toLowerCase();
-const BOOTSTRAP_PASSWORD = process.env.SUPER_ADMIN_PASSWORD || 'karabo';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true' || !!process.env.RENDER_EXTERNAL_URL;
+const JWT_SECRET = process.env.SUPER_ADMIN_JWT_SECRET || process.env.JWT_SECRET || '';
+if (!JWT_SECRET || JWT_SECRET === 'bcmfoodhub-secret-2024') {
+  if (IS_PRODUCTION) {
+    console.error('FATAL: Set SUPER_ADMIN_JWT_SECRET (or JWT_SECRET) to a strong unique value in production.');
+    process.exit(1);
+  }
+  console.warn('⚠️ Super admin JWT secret is default/missing — OK only for local dev.');
+}
+const EFFECTIVE_JWT_SECRET = JWT_SECRET || 'bcmfoodhub-super-dev-only';
+const BOOTSTRAP_USERNAME = (process.env.SUPER_ADMIN_USERNAME || (IS_PRODUCTION ? '' : 'karabo')).trim().toLowerCase();
+const BOOTSTRAP_PASSWORD = process.env.SUPER_ADMIN_PASSWORD || (IS_PRODUCTION ? '' : 'karabo');
+if (IS_PRODUCTION && (!BOOTSTRAP_USERNAME || !BOOTSTRAP_PASSWORD || BOOTSTRAP_PASSWORD === 'karabo')) {
+  // Allow existing admin in DB; only block weak bootstrap creation
+  console.warn('⚠️ SUPER_ADMIN_USERNAME/PASSWORD should be set for bootstrap. Weak default password is blocked in production bootstrap.');
+}
+
 const ORDER_STATUSES = ['Pending Payment','Paid','Confirmed','Preparing','Packed','Shipped','In Transit','Delivered','Completed','Cancelled','Refunded'];
 const PROVINCES = ['Eastern Cape','Free State','Gauteng','KwaZulu-Natal','Limpopo','Mpumalanga','Northern Cape','North West','Western Cape'];
 
-app.use(cors());
+const ALLOWED_ORIGINS = String(process.env.ALLOWED_ORIGINS || '').split(',').map(s=>s.trim()).filter(Boolean);
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || !ALLOWED_ORIGINS.length || ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    return cb(new Error('CORS blocked'));
+  },
+  credentials: true
+}));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -107,6 +128,25 @@ const Review = mongoose.models.Review || mongoose.model('Review', ReviewSchema);
 const PayoutSchema = new mongoose.Schema({ storeId: String, storeName: String, periodFrom: Date, periodTo: Date, grossSales: Number, commissionRate: Number, commissionAmount: Number, payoutAmount: Number, status: { type: String, default: 'pending' }, paidAt: Date, reference: String, createdAt: { type: Date, default: Date.now } }, { strict: false });
 const Payout = mongoose.models.Payout || mongoose.model('Payout', PayoutSchema);
 
+const RefundRequestSchema = new mongoose.Schema({
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', required: true },
+  orderNumber: String,
+  reason: { type: String, default: 'other' },
+  details: String,
+  photos: [String],
+  amountRequested: Number,
+  amountApproved: Number,
+  status: { type: String, enum: ['open','under_review','approved','rejected','refunded','closed'], default: 'open' },
+  adminNotes: String,
+  payfastRefundRef: String,
+  resolvedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  resolvedAt: Date,
+  createdAt: { type: Date, default: Date.now }
+}, { strict: false });
+const RefundRequest = mongoose.models.RefundRequest || mongoose.model('RefundRequest', RefundRequestSchema);
+
+
 const NotificationSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, storeId: String, type: String,
   title: String, message: String, link: String, read: { type: Boolean, default: false }, createdAt: { type: Date, default: Date.now }
@@ -130,6 +170,7 @@ const AdminAuditSchema = new mongoose.Schema({
 const AdminAudit = mongoose.models.AdminAudit || mongoose.model('AdminAudit', AdminAuditSchema);
 
 // --------------------- HELPERS / AUTH ---------------------
+const escapeRegex = s => String(s||'').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const clean = (value, length=500) => typeof value === 'string' ? value.trim().slice(0, length) : '';
 const num = (value, fallback=0) => { const parsed = Number(value); return Number.isFinite(parsed) ? parsed : fallback; };
 const bool = value => value === true || value === 'true';
@@ -142,7 +183,7 @@ function adminAuth(req, res, next) {
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
   if (!token) return res.status(401).json({ error: 'Please log in.' });
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, EFFECTIVE_JWT_SECRET);
     if (decoded.role !== 'super_admin') return res.status(403).json({ error: 'Super admin access required.' });
     User.findById(decoded.userId).then(user => {
       if (!user || !user.isActive || user.role !== 'super_admin') return res.status(401).json({ error: 'Your admin session is no longer active.' });
@@ -169,7 +210,7 @@ app.post('/api/auth/login', async (req, res) => {
     const user = await User.findOne({ username });
     if (!user || user.role !== 'super_admin' || !user.isActive) return res.status(401).json({ error: 'Invalid admin credentials.' });
     if (!user.passwordHash || !(await bcrypt.compare(password, user.passwordHash))) return res.status(401).json({ error: 'Invalid admin credentials.' });
-    const token = jwt.sign({ userId: user._id, role: 'super_admin' }, JWT_SECRET, { expiresIn: '12h' });
+    const token = jwt.sign({ userId: user._id, role: 'super_admin' }, EFFECTIVE_JWT_SECRET, { expiresIn: '12h' });
     res.json({ token, user: userView(user) });
   } catch (error) { res.status(500).json({ error: 'Could not log in.' }); }
 });
@@ -216,7 +257,7 @@ app.get('/api/admin/dashboard', adminAuth, async (req, res) => {
 app.get('/api/admin/stores', adminAuth, async (req, res) => {
   const status = clean(req.query.status || 'all', 30); const search = clean(req.query.search || '', 120);
   const query = status === 'all' ? {} : { approvalStatus: status };
-  if (search) query.$or = [{ name: new RegExp(search, 'i') }, { city: new RegExp(search, 'i') }, { email: new RegExp(search, 'i') }];
+  if (search) query.$or = [{ name: new RegExp(escapeRegex(search), 'i') }, { city: new RegExp(escapeRegex(search), 'i') }, { email: new RegExp(escapeRegex(search), 'i') }];
   const stores = await Store.find(query).populate('ownerId', 'name email phone').sort({ submittedAt: 1, createdAt: -1 }).limit(300);
   res.json(stores);
 });
@@ -258,7 +299,7 @@ app.delete('/api/admin/stores/:id', adminAuth, async (req, res) => {
 app.get('/api/admin/products', adminAuth, async (req, res) => {
   const search = clean(req.query.search || '', 120); const status = clean(req.query.status || 'all', 20); const storeId = clean(req.query.storeId || '', 100);
   const query = {}; if (status === 'active') query.active = true; if (status === 'inactive') query.active = false; if (storeId) query.storeId = storeId;
-  if (search) query.$or = [{ name: new RegExp(search, 'i') }, { id: new RegExp(search, 'i') }];
+  if (search) query.$or = [{ name: new RegExp(escapeRegex(search), 'i') }, { id: new RegExp(escapeRegex(search), 'i') }];
   const products = await Product.find(query).sort({ createdAt: -1 }).limit(400);
   const stores = await Store.find({ id: { $in: [...new Set(products.map(product => product.storeId))] } }).select('id name city approvalStatus');
   const map = Object.fromEntries(stores.map(store => [store.id, store]));
@@ -283,7 +324,7 @@ app.delete('/api/admin/products/:id', adminAuth, async (req, res) => {
 app.get('/api/admin/orders', adminAuth, async (req, res) => {
   const status = clean(req.query.status || 'all', 40); const search = clean(req.query.search || '', 120);
   const query = status === 'all' ? {} : { status };
-  if (search) query.$or = [{ orderNumber: new RegExp(search, 'i') }, { 'items.productName': new RegExp(search, 'i') }];
+  if (search) query.$or = [{ orderNumber: new RegExp(escapeRegex(search), 'i') }, { 'items.productName': new RegExp(escapeRegex(search), 'i') }];
   const orders = await Order.find(query).populate('userId', 'name email phone').sort({ createdAt: -1 }).limit(400);
   res.json(orders);
 });
@@ -304,7 +345,7 @@ app.put('/api/admin/orders/:id', adminAuth, async (req, res) => {
 app.get('/api/admin/users', adminAuth, async (req, res) => {
   const search = clean(req.query.search || '', 120); const role = clean(req.query.role || 'customer', 40);
   const query = role === 'all' ? {} : { role };
-  if (search) query.$or = [{ name: new RegExp(search, 'i') }, { email: new RegExp(search, 'i') }, { phone: new RegExp(search, 'i') }];
+  if (search) query.$or = [{ name: new RegExp(escapeRegex(search), 'i') }, { email: new RegExp(escapeRegex(search), 'i') }, { phone: new RegExp(escapeRegex(search), 'i') }];
   res.json(await User.find(query).select('-passwordHash').sort({ createdAt: -1 }).limit(400));
 });
 app.put('/api/admin/users/:id/status', adminAuth, async (req, res) => {
@@ -317,11 +358,42 @@ app.put('/api/admin/users/:id/status', adminAuth, async (req, res) => {
 app.get('/api/admin/payouts', adminAuth, async (req, res) => res.json(await Payout.find({}).sort({ createdAt: -1 }).limit(300)));
 app.post('/api/admin/payouts/calculate', adminAuth, async (req, res) => {
   const store = await Store.findOne({ id: clean(req.body.storeId, 100) }); if (!store) return res.status(404).json({ error: 'Store not found.' });
-  const from = req.body.periodFrom ? new Date(req.body.periodFrom) : new Date(new Date().getFullYear(), new Date().getMonth(), 1); const to = req.body.periodTo ? new Date(req.body.periodTo) : new Date();
-  const orders = await Order.find({ paymentStatus: 'paid', createdAt: { $gte: from, $lte: to }, 'items.storeId': store.id });
-  const grossSales = orders.reduce((sum, order) => sum + (order.items || []).filter(item => item.storeId === store.id).reduce((inner,item) => inner + (item.price || 0) * (item.quantity || 0), 0), 0);
-  const commissionRate = store.commissionRate || 12; const commissionAmount = Math.round(grossSales * commissionRate / 100); const payout = await Payout.create({ storeId: store.id, storeName: store.name, periodFrom: from, periodTo: to, grossSales, commissionRate, commissionAmount, payoutAmount: grossSales - commissionAmount, status: 'pending' });
-  await audit(req, 'calculate', 'payout', payout._id, `Calculated payout for ${store.name}`); res.status(201).json(payout);
+  const from = req.body.periodFrom ? new Date(req.body.periodFrom) : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  const to = req.body.periodTo ? new Date(req.body.periodTo) : new Date();
+  // Prevent duplicate payout periods for the same store
+  const existing = await Payout.findOne({
+    storeId: store.id,
+    periodFrom: from,
+    periodTo: to,
+    status: { $in: ['pending', 'approved', 'paid'] }
+  });
+  if (existing && !bool(req.body.recalculate)) {
+    return res.status(409).json({ error: 'A payout for this store and period already exists. Pass recalculate=true to replace a pending one.', payout: existing });
+  }
+  // Eligible sales: paid orders that are not cancelled/refunded
+  const orders = await Order.find({
+    paymentStatus: 'paid',
+    status: { $nin: ['Cancelled', 'Refunded'] },
+    createdAt: { $gte: from, $lte: to },
+    'items.storeId': store.id
+  });
+  const grossSales = orders.reduce((sum, order) => sum + (order.items || []).filter(item => item.storeId === store.id && !['Cancelled','Refunded'].includes(item.fulfillmentStatus)).reduce((inner,item) => inner + (item.price || 0) * (item.quantity || 0), 0), 0);
+  const commissionRate = store.commissionRate || 12;
+  const commissionAmount = Math.round(grossSales * commissionRate / 100);
+  const payoutAmount = grossSales - commissionAmount;
+  let payout;
+  if (existing && existing.status === 'pending' && bool(req.body.recalculate)) {
+    existing.grossSales = grossSales;
+    existing.commissionRate = commissionRate;
+    existing.commissionAmount = commissionAmount;
+    existing.payoutAmount = payoutAmount;
+    await existing.save();
+    payout = existing;
+  } else {
+    payout = await Payout.create({ storeId: store.id, storeName: store.name, periodFrom: from, periodTo: to, grossSales, commissionRate, commissionAmount, payoutAmount, status: 'pending' });
+  }
+  await audit(req, 'calculate', 'payout', payout._id, `Calculated payout for ${store.name}: R${payoutAmount}`);
+  res.status(201).json(payout);
 });
 app.put('/api/admin/payouts/:id', adminAuth, async (req, res) => {
   const payout = await Payout.findById(req.params.id); if (!payout) return res.status(404).json({ error: 'Payout not found.' });
@@ -387,6 +459,52 @@ app.put('/api/admin/coupons/:id', adminAuth, async (req, res) => {
 });
 
 // --------------------- SUPPORT / SETTINGS / AUDIT ---------------------
+
+// --------------------- REFUNDS / DISPUTES ---------------------
+app.get('/api/admin/refunds', adminAuth, async (req, res) => {
+  const status = clean(req.query.status || 'all', 30);
+  const query = status === 'all' ? {} : { status };
+  const items = await RefundRequest.find(query).populate('userId', 'name email phone').populate('orderId', 'orderNumber total status paymentStatus').sort({ createdAt: -1 }).limit(300);
+  res.json(items);
+});
+app.put('/api/admin/refunds/:id', adminAuth, async (req, res) => {
+  const item = await RefundRequest.findById(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Refund request not found.' });
+  const status = clean(req.body.status, 30);
+  const allowed = ['open','under_review','approved','rejected','refunded','closed'];
+  if (status && !allowed.includes(status)) return res.status(400).json({ error: 'Invalid refund status.' });
+  if (status) item.status = status;
+  if (req.body.adminNotes !== undefined) item.adminNotes = clean(req.body.adminNotes, 2000);
+  if (req.body.amountApproved !== undefined && req.body.amountApproved !== '') item.amountApproved = Math.max(0, num(req.body.amountApproved));
+  if (req.body.payfastRefundRef !== undefined) item.payfastRefundRef = clean(req.body.payfastRefundRef, 120);
+  if (['approved','rejected','refunded','closed'].includes(item.status)) {
+    item.resolvedBy = req.user._id;
+    item.resolvedAt = new Date();
+  }
+  // When marked refunded, sync order status if full refund
+  if (item.status === 'refunded' && item.orderId) {
+    const order = await Order.findById(item.orderId);
+    if (order) {
+      order.status = 'Refunded';
+      order.paymentStatus = 'refunded';
+      order.updatedAt = new Date();
+      await order.save();
+    }
+  }
+  await item.save();
+  if (item.userId) {
+    await Notification.create({
+      userId: item.userId,
+      type: 'refund',
+      title: `Refund ${item.status}`,
+      message: item.adminNotes || `Your refund request for order ${item.orderNumber || ''} is now ${item.status}.`,
+      link: '/account'
+    }).catch(()=>{});
+  }
+  await audit(req, 'refund_' + (status || 'update'), 'refund', item._id, `Refund ${item.orderNumber || item._id}: ${item.status}`);
+  res.json(item);
+});
+
 app.get('/api/admin/support', adminAuth, async (req, res) => res.json(await SupportTicket.find({}).populate('userId','name email phone').sort({ createdAt: -1 }).limit(300)));
 app.put('/api/admin/support/:id', adminAuth, async (req, res) => {
   const ticket = await SupportTicket.findById(req.params.id); if (!ticket) return res.status(404).json({ error: 'Ticket not found.' });
@@ -430,16 +548,26 @@ async function bootstrapAdmin() {
       if (!admin.passwordHash) admin.passwordHash = await bcrypt.hash(BOOTSTRAP_PASSWORD, 12);
       await admin.save();
     } else {
-      admin = await User.create({ username: BOOTSTRAP_USERNAME, name: 'Karabo', email, passwordHash: await bcrypt.hash(BOOTSTRAP_PASSWORD, 12), role: 'super_admin', bootstrapAdmin: true, isVerified: true, isActive: true });
+      if (!BOOTSTRAP_USERNAME || !BOOTSTRAP_PASSWORD) {
+        throw new Error('SUPER_ADMIN_USERNAME and SUPER_ADMIN_PASSWORD are required to create the first admin.');
+      }
+      if (IS_PRODUCTION && BOOTSTRAP_PASSWORD === 'karabo') {
+        throw new Error('Refuse to bootstrap with default password in production.');
+      }
+      admin = await User.create({ username: BOOTSTRAP_USERNAME, name: BOOTSTRAP_USERNAME, email, passwordHash: await bcrypt.hash(BOOTSTRAP_PASSWORD, 12), role: 'super_admin', bootstrapAdmin: true, isVerified: true, isActive: true });
     }
     console.log(`✅ Bootstrap super admin created: ${BOOTSTRAP_USERNAME}`);
   } else {
     // Keep a changed password intact. Until it is changed in My Admin Profile,
     // the requested initial test password remains available on restarts.
     admin.role = 'super_admin'; admin.bootstrapAdmin = true; admin.isActive = true;
-    if (!admin.passwordChangedAt) admin.passwordHash = await bcrypt.hash(BOOTSTRAP_PASSWORD, 12);
+    if (!admin.passwordChangedAt && BOOTSTRAP_PASSWORD && BOOTSTRAP_PASSWORD !== 'karabo') {
+      admin.passwordHash = await bcrypt.hash(BOOTSTRAP_PASSWORD, 12);
+    } else if (!admin.passwordChangedAt && !IS_PRODUCTION && BOOTSTRAP_PASSWORD) {
+      admin.passwordHash = await bcrypt.hash(BOOTSTRAP_PASSWORD, 12);
+    }
     await admin.save();
-    console.log(`✅ Bootstrap super admin ready: ${BOOTSTRAP_USERNAME}`);
+    console.log(`✅ Bootstrap super admin ready: ${BOOTSTRAP_USERNAME || admin.username}`);
   }
 }
 
@@ -448,5 +576,14 @@ mongoose.connect(MONGO_URI).then(async () => {
   try { await bootstrapAdmin(); } catch (error) { console.error('Admin bootstrap error:', error.message); }
 }).catch(error => console.error('MongoDB connection error:', error.message));
 
+
+app.get('/api/health', (req, res) => {
+  res.status(mongoose.connection.readyState === 1 ? 200 : 503).json({
+    ok: mongoose.connection.readyState === 1,
+    service: 'super-admin',
+    mongo: mongoose.connection.readyState === 1 ? 'up' : 'down',
+    time: new Date().toISOString()
+  });
+});
 app.listen(PORT, '0.0.0.0', () => console.log(`🚀 BCM FoodHub Super Admin running at http://localhost:${PORT}`));
 
