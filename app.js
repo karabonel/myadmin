@@ -62,6 +62,16 @@ const UserSchema = new mongoose.Schema({
   createdAt: { type: Date, default: Date.now }
 }, { strict: false });
 const User = mongoose.models.User || mongoose.model('User', UserSchema);
+const PasswordResetSchema = new mongoose.Schema({
+  email: { type: String, unique: true, lowercase: true },
+  codeHash: String,
+  tokenHash: String,
+  attempts: { type: Number, default: 0 },
+  verified: Boolean,
+  lastSentAt: Date,
+  expiresAt: { type: Date, expires: 0 }
+}, { strict: false });
+const PasswordReset = mongoose.models.PasswordReset || mongoose.model('PasswordReset', PasswordResetSchema);
 
 const StoreSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
@@ -176,6 +186,9 @@ const num = (value, fallback=0) => { const parsed = Number(value); return Number
 const bool = value => value === true || value === 'true';
 const list = value => Array.isArray(value) ? value.map(item => String(item).trim()).filter(Boolean) : String(value || '').split(',').map(item => item.trim()).filter(Boolean);
 const slugify = text => clean(text, 120).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+function escapeRegExp(string) {
+  return String(string || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 const userView = user => ({ _id: user._id, username: user.username, name: user.name, email: user.email, role: user.role, avatar: user.avatar, createdAt: user.createdAt });
 
 function adminAuth(req, res, next) {
@@ -201,18 +214,171 @@ async function uniqueSlug(Model, desired, ignoreId=null) {
   return candidate;
 }
 
+async function notifySuperAdmins({ type, title, message, link = '/support' }) {
+  try {
+    const admins = await User.find({ role: 'super_admin', isActive: true }).select('_id');
+    if (admins.length) {
+      await Notification.insertMany(
+        admins.map(admin => ({
+          userId: admin._id,
+          type: type || 'support',
+          title: title || 'New support ticket',
+          message: message || '',
+          link: link || '/support',
+          read: false,
+          createdAt: new Date()
+        }))
+      );
+    }
+  } catch (err) {
+    console.error('Notify super admins error:', err.message);
+  }
+}
+
 // --------------------- LOGIN ONLY ---------------------
 app.post('/api/auth/login', async (req, res) => {
   try {
     const username = clean(req.body.username, 80).toLowerCase();
     const password = String(req.body.password || '');
     if (!username || !password) return res.status(400).json({ error: 'Enter your username and password.' });
-    const user = await User.findOne({ username });
+    const user = await User.findOne({
+      $or: [{ username }, { email: username }],
+      role: 'super_admin',
+      isActive: true
+    });
     if (!user || user.role !== 'super_admin' || !user.isActive) return res.status(401).json({ error: 'Invalid admin credentials.' });
     if (!user.passwordHash || !(await bcrypt.compare(password, user.passwordHash))) return res.status(401).json({ error: 'Invalid admin credentials.' });
     const token = jwt.sign({ userId: user._id, role: 'super_admin' }, EFFECTIVE_JWT_SECRET, { expiresIn: '12h' });
     res.json({ token, user: userView(user) });
   } catch (error) { res.status(500).json({ error: 'Could not log in.' }); }
+});
+
+app.post('/api/auth/forgot-password', async (req, res) => {
+  try {
+    const key = clean(req.body.identifier || req.body.email || req.body.username || '', 160).toLowerCase();
+    if (!key) return res.status(400).json({ error: 'Enter your admin username or email.' });
+    const user = await User.findOne({
+      $or: [{ username: key }, { email: new RegExp('^' + escapeRegExp(key) + '$', 'i') }],
+      role: 'super_admin',
+      isActive: true
+    });
+    if (!user) return res.status(400).json({ error: 'Username/email and phone number do not match a Super Admin account.' });
+    res.json({ ok: true, message: 'Enter your admin username/email and phone number to verify identity.' });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Could not start password reset.' });
+  }
+});
+
+app.post('/api/auth/verify-reset-identity', async (req, res) => {
+  try {
+    const key = clean(req.body.identifier || req.body.email || req.body.username || '', 160).toLowerCase();
+    const phoneRaw = clean(req.body.phone || '', 40);
+    if (!key) return res.status(400).json({ error: 'Username or email is required.' });
+    if (!phoneRaw) return res.status(400).json({ error: 'Enter the phone number on your account.' });
+
+    const user = await User.findOne({
+      $or: [{ username: key }, { email: new RegExp('^' + escapeRegExp(key) + '$', 'i') }],
+      role: 'super_admin',
+      isActive: true
+    });
+    if (!user) {
+      return res.status(400).json({ error: 'Username/email and phone number do not match a Super Admin account.' });
+    }
+
+    const digits = phoneRaw.replace(/\D/g, '');
+    const storedDigits = String(user.phone || '').replace(/\D/g, '');
+    if (storedDigits.length >= 7) {
+      const match =
+        storedDigits === digits ||
+        storedDigits.slice(-9) === digits.slice(-9) ||
+        storedDigits.slice(-7) === digits.slice(-7);
+      if (!match) {
+        return res.status(400).json({ error: 'Username/email and phone number do not match a Super Admin account.' });
+      }
+    }
+
+    const ticket = crypto.randomBytes(32).toString('hex');
+    const ticketHash = crypto.createHash('sha256').update(ticket).digest('hex');
+    await PasswordReset.findOneAndUpdate(
+      { email: user.email || user.username },
+      {
+        email: user.email || user.username,
+        userId: user._id,
+        codeHash: ticketHash,
+        tokenHash: ticketHash,
+        attempts: 0,
+        verified: true,
+        lastSentAt: new Date(),
+        expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    res.json({
+      ok: true,
+      message: 'Identity verified. Choose a new admin password.',
+      resetTicket: ticket,
+      username: user.username
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Could not verify identity.' });
+  }
+});
+
+app.post('/api/auth/reset-password', async (req, res) => {
+  try {
+    const key = clean(req.body.identifier || req.body.email || req.body.username || '', 160).toLowerCase();
+    const ticket = clean(req.body.resetTicket || req.body.token || req.body.resetToken || '', 100);
+    const phoneRaw = clean(req.body.phone || '', 40);
+    const newPassword = String(req.body.newPassword || req.body.password || '');
+    const confirmPassword = String(req.body.confirmPassword || req.body.passwordConfirm || '');
+
+    if (!key) return res.status(400).json({ error: 'Username/email is required.' });
+    if (newPassword.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    if (confirmPassword && confirmPassword !== newPassword) {
+      return res.status(400).json({ error: 'Passwords do not match.' });
+    }
+
+    const user = await User.findOne({
+      $or: [{ username: key }, { email: new RegExp('^' + escapeRegExp(key) + '$', 'i') }],
+      role: 'super_admin',
+      isActive: true
+    });
+    if (!user) {
+      return res.status(400).json({ error: 'Account not found.' });
+    }
+
+    let pending = null;
+    if (ticket) {
+      const ticketHash = crypto.createHash('sha256').update(ticket).digest('hex');
+      pending = await PasswordReset.findOne({ email: user.email || user.username, $or: [{ tokenHash: ticketHash }, { codeHash: ticketHash }] });
+    }
+
+    if (!pending || pending.expiresAt < new Date() || !pending.verified) {
+      if (!phoneRaw) {
+        return res.status(400).json({ error: 'Session expired. Go back and verify your admin account again.' });
+      }
+      const digits = phoneRaw.replace(/\D/g, '');
+      const storedDigits = String(user.phone || '').replace(/\D/g, '');
+      if (storedDigits.length >= 7) {
+        const match =
+          storedDigits === digits ||
+          storedDigits.slice(-9) === digits.slice(-9) ||
+          storedDigits.slice(-7) === digits.slice(-7);
+        if (!match) {
+          return res.status(400).json({ error: 'Session expired. Go back and verify your admin account again.' });
+        }
+      }
+    }
+
+    user.passwordHash = await bcrypt.hash(newPassword, 12);
+    user.passwordChangedAt = new Date();
+    await user.save();
+    await PasswordReset.deleteOne({ email: user.email || user.username }).catch(() => {});
+    res.json({ ok: true, message: 'Password updated. You can log in.' });
+  } catch (e) {
+    res.status(500).json({ error: e.message || 'Could not reset password.' });
+  }
 });
 app.get('/api/auth/me', adminAuth, (req, res) => res.json(userView(req.user)));
 app.put('/api/auth/profile', adminAuth, async (req, res) => {
@@ -512,6 +678,62 @@ app.put('/api/admin/support/:id', adminAuth, async (req, res) => {
   const message = clean(req.body.message, 2000); if (message) ticket.responses.push({ sender: 'admin', message, createdAt: new Date() });
   await ticket.save(); if (ticket.userId && message) await Notification.create({ userId: ticket.userId, type: 'support', title: 'Support replied', message: `BCM FoodHub replied to: ${ticket.subject}`, link: '/account/messages' });
   await audit(req, 'reply', 'support_ticket', ticket._id, `Updated ${ticket.subject}`); res.json(ticket);
+});
+
+app.post('/api/support', async (req, res) => {
+  try {
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    let user = null;
+    if (token) {
+      try {
+        const d = jwt.verify(token, EFFECTIVE_JWT_SECRET);
+        user = await User.findById(d.userId);
+      } catch(e) {}
+    }
+    const subject = clean(req.body.subject || 'Support request', 120);
+    const message = clean(req.body.message, 2000);
+    if (!message) return res.status(400).json({ error: 'Message is required.' });
+    const ticket = await SupportTicket.create({
+      userId: user ? user._id : undefined,
+      storeId: clean(req.body.storeId || '', 80),
+      subject,
+      message,
+      status: 'open',
+      priority: clean(req.body.priority || 'medium', 20),
+      createdAt: new Date()
+    });
+    await notifySuperAdmins({
+      type: 'support',
+      title: 'New Customer Support Ticket',
+      message: `${subject}: ${message.slice(0, 100)} ${user ? '(' + user.name + ')' : '(Guest)'}`,
+      link: '/support'
+    });
+    res.status(201).json(ticket);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.post('/api/support/:id/reply', async (req, res) => {
+  try {
+    const ticket = await SupportTicket.findById(req.params.id);
+    if (!ticket) return res.status(404).json({ error: 'Ticket not found.' });
+    const message = clean(req.body.message, 2000);
+    if (!message) return res.status(400).json({ error: 'Message is required.' });
+    ticket.responses.push({ sender: 'customer', message, createdAt: new Date() });
+    ticket.status = 'open';
+    await ticket.save();
+    await notifySuperAdmins({
+      type: 'support',
+      title: 'Customer Support Reply',
+      message: `Reply on ${ticket.subject}: ${message.slice(0, 100)}`,
+      link: '/support'
+    });
+    res.json(ticket);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 app.get('/api/admin/settings', adminAuth, async (req, res) => {
   const settings = await PlatformSettings.find({}); const map = {}; settings.forEach(item => map[item.key] = item.value); res.json(map);
