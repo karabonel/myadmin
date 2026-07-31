@@ -21,12 +21,8 @@ if (!JWT_SECRET || JWT_SECRET === 'bcmfoodhub-secret-2024') {
   console.warn('⚠️ Super admin JWT secret is default/missing — OK only for local dev.');
 }
 const EFFECTIVE_JWT_SECRET = JWT_SECRET || 'bcmfoodhub-super-dev-only';
-const BOOTSTRAP_USERNAME = (process.env.SUPER_ADMIN_USERNAME || (IS_PRODUCTION ? '' : 'karabo')).trim().toLowerCase();
-const BOOTSTRAP_PASSWORD = process.env.SUPER_ADMIN_PASSWORD || (IS_PRODUCTION ? '' : 'karabo');
-if (IS_PRODUCTION && (!BOOTSTRAP_USERNAME || !BOOTSTRAP_PASSWORD || BOOTSTRAP_PASSWORD === 'karabo')) {
-  // Allow existing admin in DB; only block weak bootstrap creation
-  console.warn('⚠️ SUPER_ADMIN_USERNAME/PASSWORD should be set for bootstrap. Weak default password is blocked in production bootstrap.');
-}
+const BOOTSTRAP_USERNAME = (process.env.SUPER_ADMIN_USERNAME || 'karabo').trim().toLowerCase();
+const BOOTSTRAP_PASSWORD = process.env.SUPER_ADMIN_PASSWORD || 'karabo';
 
 const ORDER_STATUSES = ['Pending Payment','Paid','Confirmed','Preparing','Packed','Shipped','In Transit','Delivered','Completed','Cancelled','Refunded'];
 const PROVINCES = ['Eastern Cape','Free State','Gauteng','KwaZulu-Natal','Limpopo','Mpumalanga','Northern Cape','North West','Western Cape'];
@@ -770,12 +766,6 @@ async function bootstrapAdmin() {
       if (!admin.passwordHash) admin.passwordHash = await bcrypt.hash(BOOTSTRAP_PASSWORD, 12);
       await admin.save();
     } else {
-      if (!BOOTSTRAP_USERNAME || !BOOTSTRAP_PASSWORD) {
-        throw new Error('SUPER_ADMIN_USERNAME and SUPER_ADMIN_PASSWORD are required to create the first admin.');
-      }
-      if (IS_PRODUCTION && BOOTSTRAP_PASSWORD === 'karabo') {
-        throw new Error('Refuse to bootstrap with default password in production.');
-      }
       admin = await User.create({ username: BOOTSTRAP_USERNAME, name: BOOTSTRAP_USERNAME, email, passwordHash: await bcrypt.hash(BOOTSTRAP_PASSWORD, 12), role: 'super_admin', bootstrapAdmin: true, isVerified: true, isActive: true });
     }
     console.log(`✅ Bootstrap super admin created: ${BOOTSTRAP_USERNAME}`);
@@ -783,9 +773,7 @@ async function bootstrapAdmin() {
     // Keep a changed password intact. Until it is changed in My Admin Profile,
     // the requested initial test password remains available on restarts.
     admin.role = 'super_admin'; admin.bootstrapAdmin = true; admin.isActive = true;
-    if (!admin.passwordChangedAt && BOOTSTRAP_PASSWORD && BOOTSTRAP_PASSWORD !== 'karabo') {
-      admin.passwordHash = await bcrypt.hash(BOOTSTRAP_PASSWORD, 12);
-    } else if (!admin.passwordChangedAt && !IS_PRODUCTION && BOOTSTRAP_PASSWORD) {
+    if (!admin.passwordChangedAt && BOOTSTRAP_PASSWORD) {
       admin.passwordHash = await bcrypt.hash(BOOTSTRAP_PASSWORD, 12);
     }
     await admin.save();
@@ -808,5 +796,4 @@ app.get('/api/health', (req, res) => {
   });
 });
 app.listen(PORT, '0.0.0.0', () => console.log(`🚀 BCM FoodHub Super Admin running at http://localhost:${PORT}`));
-
 
