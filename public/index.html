@@ -158,11 +158,11 @@
           <Field label="Password"><input type="password" value={password} onChange={e=>setPassword(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()} autoComplete="current-password"/></Field>
           <button type="button" className="text-link" style={{marginBottom:10,display:'block',color:'var(--green)'}} onClick={()=>{setError('');setPassword('');setMode('forgot');}}>Forgot password?</button>
           <button className="btn primary full" disabled={busy} onClick={submit}>{busy?'Signing in…':'Log in to Super Admin'}</button>
-          <div className="hint"><strong>Initial test login</strong><br/>Username: <b>karabo</b><br/>Password: <b>karabo</b><br/><span style={{opacity:.78}}>Change these from My Admin Profile after testing.</span></div>
+          <div className="hint"><strong>Admin login</strong><br/>Use the Super Admin username/email and password configured for this deployment.<br/><span style={{opacity:.78}}>You can change the password anytime under My Admin Profile.</span></div>
         </>}
         {mode==='forgot'&&<>
-          <div className="notice" style={{marginBottom:12,padding:11,background:'#112719',borderRadius:10,color:'#aeecc0',fontSize:12}}><strong>Step 1 of 2</strong><br/>Enter your Super Admin username (e.g. karabo) or email and registered phone number.</div>
-          <Field label="Admin username or email"><input value={username} onChange={e=>setUsername(e.target.value)} placeholder="e.g. karabo or admin@bcmfoodhub.co.za" autoComplete="username"/></Field>
+          <div className="notice" style={{marginBottom:12,padding:11,background:'#112719',borderRadius:10,color:'#aeecc0',fontSize:12}}><strong>Step 1 of 2</strong><br/>Enter your Super Admin username or email and the phone number on the account.</div>
+          <Field label="Admin username or email"><input value={username} onChange={e=>setUsername(e.target.value)} placeholder="e.g. you@email.com" autoComplete="username"/></Field>
           <Field label="Phone number on account"><input type="tel" value={phone} onChange={e=>setPhone(e.target.value)} onKeyDown={e=>e.key==='Enter'&&requestReset()} placeholder="+27821234567" autoComplete="tel"/></Field>
           <button className="btn primary full" disabled={busy||!username||!phone} onClick={requestReset}>{busy?'Verifying…':'Continue'}</button>
           <button type="button" className="text-link" style={{marginTop:12,display:'block',color:'var(--muted)'}} onClick={()=>{setError('');setMode('login');}}>Back to log in</button>
