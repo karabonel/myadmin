@@ -7,6 +7,7 @@ const jwt = require('jsonwebtoken');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.SUPER_ADMIN_PORT || process.env.PORT || 3001;
@@ -21,8 +22,12 @@ if (!JWT_SECRET || JWT_SECRET === 'bcmfoodhub-secret-2024') {
   console.warn('⚠️ Super admin JWT secret is default/missing — OK only for local dev.');
 }
 const EFFECTIVE_JWT_SECRET = JWT_SECRET || 'bcmfoodhub-super-dev-only';
-const BOOTSTRAP_USERNAME = (process.env.SUPER_ADMIN_USERNAME || 'karabo').trim().toLowerCase();
-const BOOTSTRAP_PASSWORD = process.env.SUPER_ADMIN_PASSWORD || 'karabo';
+const BOOTSTRAP_USERNAME = (process.env.SUPER_ADMIN_USERNAME || 'karabomanaga1@gmail.com').trim().toLowerCase();
+const BOOTSTRAP_PASSWORD = process.env.SUPER_ADMIN_PASSWORD || '@Karabo1234';
+const BOOTSTRAP_IS_EMAIL = BOOTSTRAP_USERNAME.includes('@');
+const BOOTSTRAP_EMAIL = BOOTSTRAP_IS_EMAIL
+  ? BOOTSTRAP_USERNAME
+  : `${BOOTSTRAP_USERNAME}@bcmfoodhub.admin`;
 
 const ORDER_STATUSES = ['Pending Payment','Paid','Confirmed','Preparing','Packed','Shipped','In Transit','Delivered','Completed','Cancelled','Refunded'];
 const PROVINCES = ['Eastern Cape','Free State','Gauteng','KwaZulu-Natal','Limpopo','Mpumalanga','Northern Cape','North West','Western Cape'];
@@ -757,29 +762,53 @@ app.get('*', (req, res) => {
 });
 
 async function bootstrapAdmin() {
-  let admin = await User.findOne({ $or: [{ username: BOOTSTRAP_USERNAME }, { bootstrapAdmin: true }] });
+  // Prefer explicit env credentials. Username may be an email address.
+  const username = BOOTSTRAP_USERNAME;
+  const email = BOOTSTRAP_EMAIL;
+  const password = BOOTSTRAP_PASSWORD;
+
+  let admin = await User.findOne({
+    $or: [
+      { username },
+      { email },
+      { bootstrapAdmin: true },
+      { role: 'super_admin', email: email }
+    ]
+  });
+
   if (!admin) {
-    const email = `${BOOTSTRAP_USERNAME}@bcmfoodhub.admin`;
-    const emailOwner = await User.findOne({ email });
-    if (emailOwner) {
-      admin = emailOwner; admin.username = BOOTSTRAP_USERNAME; admin.role = 'super_admin'; admin.bootstrapAdmin = true; admin.isActive = true;
-      if (!admin.passwordHash) admin.passwordHash = await bcrypt.hash(BOOTSTRAP_PASSWORD, 12);
-      await admin.save();
-    } else {
-      admin = await User.create({ username: BOOTSTRAP_USERNAME, name: BOOTSTRAP_USERNAME, email, passwordHash: await bcrypt.hash(BOOTSTRAP_PASSWORD, 12), role: 'super_admin', bootstrapAdmin: true, isVerified: true, isActive: true });
-    }
-    console.log(`✅ Bootstrap super admin created: ${BOOTSTRAP_USERNAME}`);
+    admin = await User.create({
+      username,
+      name: username.includes('@') ? username.split('@')[0] : username,
+      email,
+      passwordHash: await bcrypt.hash(password, 12),
+      role: 'super_admin',
+      bootstrapAdmin: true,
+      isVerified: true,
+      isActive: true
+    });
+    console.log(`✅ Bootstrap super admin created: ${username}`);
   } else {
-    // Keep a changed password intact. Until it is changed in My Admin Profile,
-    // the requested initial test password remains available on restarts.
-    admin.role = 'super_admin'; admin.bootstrapAdmin = true; admin.isActive = true;
-    if (!admin.passwordChangedAt && BOOTSTRAP_PASSWORD) {
-      admin.passwordHash = await bcrypt.hash(BOOTSTRAP_PASSWORD, 12);
+    // Migrate legacy bootstrap username (e.g. karabo) to the env identity
+    admin.username = username;
+    admin.email = email;
+    admin.role = 'super_admin';
+    admin.bootstrapAdmin = true;
+    admin.isActive = true;
+    admin.isVerified = true;
+    // Apply env password when:
+    // - password never changed via profile, OR
+    // - SUPER_ADMIN_FORCE_PASSWORD=true (use after rotating Render env)
+    const force = String(process.env.SUPER_ADMIN_FORCE_PASSWORD || '').toLowerCase() === 'true';
+    if (password && (force || !admin.passwordChangedAt)) {
+      admin.passwordHash = await bcrypt.hash(password, 12);
+      if (force) admin.passwordChangedAt = undefined;
     }
     await admin.save();
-    console.log(`✅ Bootstrap super admin ready: ${BOOTSTRAP_USERNAME || admin.username}`);
+    console.log(`✅ Bootstrap super admin ready: ${username}`);
   }
 }
+
 
 mongoose.connect(MONGO_URI).then(async () => {
   console.log('✅ MongoDB connected — BCM FoodHub Super Admin');
