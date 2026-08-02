@@ -751,6 +751,60 @@ app.put('/api/admin/settings', adminAuth, async (req, res) => {
 });
 app.get('/api/admin/audit', adminAuth, async (req, res) => res.json(await AdminAudit.find({}).populate('adminId','name username').sort({ createdAt: -1 }).limit(100)));
 
+// --- Advanced Fraud Detection & System Diagnostics Endpoints ---
+app.get('/api/admin/fraud', adminAuth, async (req, res) => {
+  const orders = await Order.find({ paymentStatus: 'paid' }).sort({ createdAt: -1 });
+  const flagged = [];
+  orders.forEach(order => {
+    const reasons = [];
+    if ((order.total || 0) > 5000) {
+      reasons.push('High transaction value (>R5,000)');
+    }
+    const addr = order.shippingAddress || {};
+    const prov = String(addr.province || '').toLowerCase().trim();
+    const PROVINCES = ['eastern cape','free state','gauteng','kwazu-natal','kwazulu-natal','limpopo','mpumalanga','northern cape','north west','western cape'];
+    if (addr.province && !PROVINCES.includes(prov)) {
+      reasons.push(`Unrecognized SA Province: "${addr.province}"`);
+    }
+    if (order.items && order.items.some(item => (item.quantity || 0) > 30)) {
+      reasons.push('Suspicious item quantity (>30 items of same product)');
+    }
+    if (reasons.length > 0) {
+      flagged.push({
+        orderNumber: order.orderNumber,
+        _id: order._id,
+        total: order.total,
+        createdAt: order.createdAt,
+        customer: addr.recipientName || 'Customer',
+        reasons,
+        riskScore: reasons.length * 35 + (order.total > 10000 ? 30 : 0)
+      });
+    }
+  });
+  res.json(flagged);
+});
+
+app.get('/api/admin/backup', adminAuth, async (req, res) => {
+  try {
+    const collections = {
+      users: await mongoose.model('User').countDocuments(),
+      stores: await mongoose.model('Store').countDocuments(),
+      products: await mongoose.model('Product').countDocuments(),
+      orders: await mongoose.model('Order').countDocuments(),
+      notifications: await mongoose.model('Notification').countDocuments()
+    };
+    res.json({
+      timestamp: new Date().toISOString(),
+      collections,
+      version: 'BCM FoodHub Platform Core v2.4-stable',
+      status: 'Healthy',
+      database: 'MongoDB Connected'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // --------------------- FRONTEND / PWA ---------------------
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/manifest.webmanifest', (req, res) => res.json({ name: 'BCM FoodHub Admin', short_name: 'BCM Admin', start_url: '/', display: 'standalone', background_color: '#0f1720', theme_color: '#0b7a43', icons: [{ src: '/icon.svg', sizes: 'any', type: 'image/svg+xml' }] }));
