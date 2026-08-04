@@ -457,9 +457,19 @@ app.put('/api/admin/stores/:id', adminAuth, async (req, res) => {
 });
 
 app.delete('/api/admin/stores/:id', adminAuth, async (req, res) => {
-  const store = await Store.findOne({ id: req.params.id }); if (!store) return res.status(404).json({ error: 'Store not found.' });
-  await Promise.all([Product.deleteMany({ storeId: store.id }), Store.deleteOne({ _id: store._id })]);
-  await audit(req, 'delete', 'store', store.id, `Deleted ${store.name} and its catalogue`); res.json({ ok: true });
+  const store = await Store.findOne({ id: req.params.id });
+  if (!store) return res.status(404).json({ error: 'Store not found.' });
+  // Remove store and its catalogue / store-scoped data. Historical orders are kept for records.
+  await Promise.all([
+    Product.deleteMany({ storeId: store.id }),
+    Coupon.deleteMany({ storeId: store.id }),
+    Review.deleteMany({ storeId: store.id }),
+    Payout.deleteMany({ storeId: store.id }),
+    Notification.deleteMany({ storeId: store.id }),
+    Store.deleteOne({ _id: store._id })
+  ]);
+  await audit(req, 'delete', 'store', store.id, `Deleted ${store.name} and its catalogue`);
+  res.json({ ok: true });
 });
 
 // --------------------- PRODUCTS ---------------------
@@ -519,6 +529,22 @@ app.put('/api/admin/users/:id/status', adminAuth, async (req, res) => {
   const user = await User.findById(req.params.id); if (!user) return res.status(404).json({ error: 'User not found.' });
   if (String(user._id) === String(req.user._id)) return res.status(400).json({ error: 'You cannot deactivate your own admin account.' });
   user.isActive = bool(req.body.isActive); await user.save(); await audit(req, user.isActive ? 'activate' : 'deactivate', 'user', user._id, `${user.email} ${user.isActive ? 'activated' : 'deactivated'}`); res.json({ _id: user._id, isActive: user.isActive });
+});
+app.delete('/api/admin/users/:id', adminAuth, async (req, res) => {
+  const user = await User.findById(req.params.id);
+  if (!user) return res.status(404).json({ error: 'User not found.' });
+  if (String(user._id) === String(req.user._id)) {
+    return res.status(400).json({ error: 'You cannot delete your own admin account.' });
+  }
+  if (user.role === 'super_admin') {
+    return res.status(400).json({ error: 'Super admin accounts cannot be permanently deleted. Deactivate them instead.' });
+  }
+  const email = user.email;
+  const role = user.role;
+  const name = user.name;
+  await User.deleteOne({ _id: user._id });
+  await audit(req, 'delete', 'user', user._id, `Deleted ${name || email} (${role})`);
+  res.json({ ok: true });
 });
 
 // --------------------- PAYOUTS / REVIEWS / ANNOUNCEMENTS ---------------------
@@ -879,5 +905,4 @@ app.get('/api/health', (req, res) => {
   });
 });
 app.listen(PORT, '0.0.0.0', () => console.log(`🚀 BCM FoodHub Super Admin running at http://localhost:${PORT}`));
-
 
