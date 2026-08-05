@@ -539,12 +539,47 @@ app.delete('/api/admin/users/:id', adminAuth, async (req, res) => {
   if (user.role === 'super_admin') {
     return res.status(400).json({ error: 'Super admin accounts cannot be permanently deleted. Deactivate them instead.' });
   }
-  const email = user.email;
+  const email = String(user.email || '').toLowerCase();
+  const phone = String(user.phone || '').trim();
   const role = user.role;
   const name = user.name;
-  await User.deleteOne({ _id: user._id });
-  await audit(req, 'delete', 'user', user._id, `Deleted ${name || email} (${role})`);
-  res.json({ ok: true });
+  const userId = user._id;
+
+  // Hard delete the user document
+  await User.deleteOne({ _id: userId });
+
+  // Clear auth leftovers so email/phone can be used to register again
+  const cleanup = [];
+  cleanup.push(PasswordReset.deleteMany({ email }).catch(() => {}));
+  cleanup.push(
+    mongoose.connection.collection('emailotps').deleteMany({ email }).catch(() => {})
+  );
+  if (phone) {
+    const digits = phone.replace(/\D/g, '');
+    const variants = [...new Set([
+      phone,
+      digits,
+      digits.startsWith('27') ? '+' + digits : null,
+      digits.startsWith('0') ? '+27' + digits.slice(1) : null,
+      digits.startsWith('27') ? '0' + digits.slice(2) : null,
+      digits.length === 9 ? '+27' + digits : null
+    ].filter(Boolean))];
+    cleanup.push(
+      mongoose.connection.collection('phoneotps').deleteMany({ phone: { $in: variants } }).catch(() => {})
+    );
+  }
+  // Addresses / notifications / wishlist tokens for this user (orders kept for records)
+  cleanup.push(mongoose.connection.collection('addresses').deleteMany({ userId }).catch(() => {}));
+  cleanup.push(Notification.deleteMany({ userId }).catch(() => {}));
+  cleanup.push(mongoose.connection.collection('wishlistshares').deleteMany({ userId }).catch(() => {}));
+  cleanup.push(mongoose.connection.collection('devices').updateMany(
+    { userIds: userId },
+    { $pull: { userIds: userId } }
+  ).catch(() => {}));
+  await Promise.all(cleanup);
+
+  await audit(req, 'delete', 'user', userId, `Permanently deleted ${name || email} (${role}) — email/phone freed for re-registration`);
+  res.json({ ok: true, message: 'Account permanently deleted. That email and phone can register as new.' });
 });
 
 // --------------------- PAYOUTS / REVIEWS / ANNOUNCEMENTS ---------------------
@@ -905,4 +940,5 @@ app.get('/api/health', (req, res) => {
   });
 });
 app.listen(PORT, '0.0.0.0', () => console.log(`🚀 BCM FoodHub Super Admin running at http://localhost:${PORT}`));
+
 
