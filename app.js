@@ -215,9 +215,9 @@ async function uniqueSlug(Model, desired, ignoreId=null) {
   return candidate;
 }
 
-async function notifySuperAdmins({ type, title, message, link = '/support' }) {
+async function notifySuperAdmins({ type, title, message, link = '/support', emailSubject }) {
   try {
-    const admins = await User.find({ role: 'super_admin', isActive: true }).select('_id');
+    const admins = await User.find({ role: 'super_admin', isActive: true }).select('_id email');
     if (admins.length) {
       await Notification.insertMany(
         admins.map(admin => ({
@@ -231,10 +231,104 @@ async function notifySuperAdmins({ type, title, message, link = '/support' }) {
         }))
       );
     }
+    // Always try email so admins see critical events outside the panel
+    await emailSuperAdmins(
+      emailSubject || title || 'BCM FoodHub alert',
+      title || 'BCM FoodHub',
+      [message || '', link ? `Open Super Admin: ${link}` : ''].filter(Boolean)
+    );
   } catch (err) {
     console.error('Notify super admins error:', err.message);
   }
 }
+
+
+// --------------------- EMAIL (Resend + SMTP) ---------------------
+function emailConfigured() {
+  return Boolean(String(process.env.RESEND_API_KEY || '').trim() || (String(process.env.SMTP_HOST || '').trim() && String(process.env.SMTP_USER || '').trim() && process.env.SMTP_PASS));
+}
+function defaultFromAddress() {
+  return process.env.OTP_EMAIL_FROM || process.env.SMTP_FROM || process.env.EMAIL_FROM || 'BCM FoodHub <noreply@bcmfoodhub.co.za>';
+}
+async function sendEmail({ to, subject, html, text }) {
+  const toAddr = String(to || '').trim().toLowerCase();
+  if (!toAddr || !toAddr.includes('@')) return { ok: false, reason: 'invalid_to' };
+  const from = defaultFromAddress();
+  const bodyText = text || String(html || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  const bodyHtml = html || `<pre style="font-family:Arial,sans-serif;white-space:pre-wrap">${String(bodyText).replace(/</g,'&lt;')}</pre>`;
+  const apiKey = String(process.env.RESEND_API_KEY || '').trim();
+  if (apiKey) {
+    try {
+      const response = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ from, to: [toAddr], subject: subject || 'BCM FoodHub', html: bodyHtml, text: bodyText })
+      });
+      if (response.ok) return { ok: true, provider: 'resend' };
+      console.warn('Resend failed:', (await response.text()).slice(0, 180));
+    } catch (e) { console.warn('Resend error:', e.message); }
+  }
+  const host = String(process.env.SMTP_HOST || '').trim();
+  const user = String(process.env.SMTP_USER || '').trim();
+  const pass = String(process.env.SMTP_PASS || '');
+  if (!host || !user || !pass) return { ok: false, reason: 'email_not_configured' };
+  try {
+    let nodemailer;
+    try { nodemailer = require('nodemailer'); } catch (reqErr) {
+      return { ok: false, reason: 'nodemailer_not_installed' };
+    }
+    const transporter = nodemailer.createTransport({
+      host, port: Number(process.env.SMTP_PORT || 587),
+      secure: String(process.env.SMTP_SECURE || '').toLowerCase() === 'true',
+      auth: { user, pass }
+    });
+    await transporter.sendMail({ from, to: toAddr, subject: subject || 'BCM FoodHub', text: bodyText, html: bodyHtml });
+    return { ok: true, provider: 'smtp' };
+  } catch (e) {
+    console.warn('SMTP failed:', e.message);
+    return { ok: false, reason: e.message };
+  }
+}
+function platformEmailHtml(title, bodyLines) {
+  const lines = (Array.isArray(bodyLines) ? bodyLines : [String(bodyLines || '')])
+    .map(l => `<p style="margin:0 0 10px;line-height:1.55;color:#24352a">${String(l).replace(/</g,'&lt;')}</p>`).join('');
+  return `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;color:#17261c">
+    <div style="font-size:13px;font-weight:800;letter-spacing:1px;color:#0b7a43;margin-bottom:12px">BCM FOODHUB</div>
+    <h2 style="margin:0 0 14px;font-size:22px;color:#0b7a43">${String(title||'').replace(/</g,'&lt;')}</h2>
+    ${lines}
+    <p style="margin:18px 0 0;font-size:12px;color:#6a7b6f">This is an automated message from BCM FoodHub marketplace.</p>
+  </div>`;
+}
+async function emailUserById(userId, subject, title, bodyLines) {
+  try {
+    if (!userId) return;
+    const user = await User.findById(userId).select('email name isActive');
+    if (!user || !user.email || user.isActive === false) return;
+    await sendEmail({
+      to: user.email,
+      subject,
+      text: [title].concat(Array.isArray(bodyLines) ? bodyLines : [bodyLines]).filter(Boolean).join('\n'),
+      html: platformEmailHtml(title, bodyLines)
+    });
+  } catch (e) { console.warn('emailUserById:', e.message); }
+}
+async function emailSuperAdmins(subject, title, bodyLines) {
+  try {
+    const admins = await User.find({ role: 'super_admin', isActive: true }).select('email name');
+    const extra = String(process.env.SUPER_ADMIN_NOTIFY_EMAIL || process.env.PLATFORM_ADMIN_EMAIL || '').split(',').map(s => s.trim()).filter(Boolean);
+    const targets = new Set(extra.map(e => e.toLowerCase()));
+    admins.forEach(a => { if (a.email) targets.add(String(a.email).toLowerCase()); });
+    for (const to of targets) {
+      await sendEmail({
+        to,
+        subject,
+        text: [title].concat(Array.isArray(bodyLines) ? bodyLines : [bodyLines]).filter(Boolean).join('\n'),
+        html: platformEmailHtml(title, bodyLines)
+      });
+    }
+  } catch (e) { console.warn('emailSuperAdmins:', e.message); }
+}
+
 
 // --------------------- LOGIN ONLY ---------------------
 app.post('/api/auth/login', async (req, res) => {
@@ -440,7 +534,41 @@ app.put('/api/admin/stores/:id/approval', adminAuth, async (req, res) => {
     store.approvalStatus = 'suspended'; store.verified = false; store.active = false; store.rejectionReason = reason || 'Store suspended by BCM FoodHub.';
   } else return res.status(400).json({ error: 'Use approve, reject or suspend.' });
   await store.save();
-  if (store.ownerId) await Notification.create({ userId: store.ownerId, storeId: store.id, type: 'approval', title: `Store ${store.approvalStatus}`, message: action === 'approve' ? `${store.name} is now live on BCM FoodHub.` : `Update for ${store.name}: ${store.rejectionReason}`, link: '/seller' });
+  const ownerMsg = action === 'approve'
+    ? `${store.name} is now live on BCM FoodHub. Customers can discover your products.`
+    : action === 'reject'
+      ? `Your store ${store.name} was not approved. Reason: ${store.rejectionReason || 'See Super Admin notes.'}`
+      : `Your store ${store.name} was suspended. ${store.rejectionReason || ''}`.trim();
+  if (store.ownerId) {
+    await Notification.create({
+      userId: store.ownerId, storeId: store.id, type: 'approval',
+      title: `Store ${store.approvalStatus}`,
+      message: ownerMsg,
+      link: '/store'
+    });
+    await emailUserById(
+      store.ownerId,
+      action === 'approve' ? `Approved: ${store.name} is live on BCM FoodHub` :
+        action === 'reject' ? `Update on ${store.name} application` :
+        `Store suspended: ${store.name}`,
+      action === 'approve' ? 'Your store is approved' :
+        action === 'reject' ? 'Store application update' :
+        'Store suspended',
+      [
+        ownerMsg,
+        store.email ? `Store contact email: ${store.email}` : '',
+        'Log in to Store Admin to continue.'
+      ].filter(Boolean)
+    );
+  }
+  // Also notify platform if extra admin emails are configured
+  if (action === 'approve') {
+    await emailSuperAdmins(
+      `Store approved: ${store.name}`,
+      'Store approved',
+      [`${store.name} (${store.city || ''}, ${store.province || ''}) is now live.`, `Store ID: ${store.id}`]
+    ).catch(() => {});
+  }
   await audit(req, action, 'store', store.id, `${store.name}: ${action}`);
   res.json(store);
 });
