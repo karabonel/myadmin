@@ -711,6 +711,50 @@ app.delete('/api/admin/users/:id', adminAuth, async (req, res) => {
 });
 
 // --------------------- PAYOUTS / REVIEWS / ANNOUNCEMENTS ---------------------
+
+async function buildStorePayoutLines(storeId, from, to) {
+  const orders = await Order.find({
+    paymentStatus: 'paid',
+    status: { $nin: ['Cancelled', 'Refunded'] },
+    createdAt: { $gte: from, $lte: to },
+    'items.storeId': storeId
+  }).sort({ createdAt: 1 }).lean();
+  let grossSales = 0;
+  let itemCount = 0;
+  const lines = [];
+  for (const order of orders) {
+    const items = (order.items || []).filter(
+      (i) => i.storeId === storeId && !['Cancelled', 'Refunded'].includes(i.fulfillmentStatus)
+    );
+    if (!items.length) continue;
+    const lineGross = items.reduce((s, i) => s + (Number(i.price) || 0) * (Number(i.quantity) || 0), 0);
+    const qty = items.reduce((s, i) => s + (Number(i.quantity) || 0), 0);
+    grossSales += lineGross;
+    itemCount += qty;
+    lines.push({
+      orderId: String(order._id),
+      orderNumber: order.orderNumber,
+      orderDate: order.createdAt,
+      itemCount: qty,
+      items: items.map((i) => ({
+        productName: i.productName,
+        quantity: i.quantity,
+        price: i.price,
+        lineTotal: Math.round((Number(i.price) || 0) * (Number(i.quantity) || 0) * 100) / 100
+      })),
+      gross: Math.round(lineGross * 100) / 100
+    });
+  }
+  return {
+    orders,
+    lines,
+    grossSales: Math.round(grossSales * 100) / 100,
+    itemCount,
+    orderCount: lines.length
+  };
+}
+
+
 app.get('/api/admin/payouts', adminAuth, async (req, res) => res.json(await Payout.find({}).sort({ createdAt: -1 }).limit(300)));
 app.post('/api/admin/payouts/calculate', adminAuth, async (req, res) => {
   const store = await Store.findOne({ id: clean(req.body.storeId, 100) }); if (!store) return res.status(404).json({ error: 'Store not found.' });
@@ -727,16 +771,14 @@ app.post('/api/admin/payouts/calculate', adminAuth, async (req, res) => {
     return res.status(409).json({ error: 'A payout for this store and period already exists. Pass recalculate=true to replace a pending one.', payout: existing });
   }
   // Eligible sales: paid orders that are not cancelled/refunded
-  const orders = await Order.find({
-    paymentStatus: 'paid',
-    status: { $nin: ['Cancelled', 'Refunded'] },
-    createdAt: { $gte: from, $lte: to },
-    'items.storeId': store.id
-  });
-  const grossSales = orders.reduce((sum, order) => sum + (order.items || []).filter(item => item.storeId === store.id && !['Cancelled','Refunded'].includes(item.fulfillmentStatus)).reduce((inner,item) => inner + (item.price || 0) * (item.quantity || 0), 0), 0);
+  const built = await buildStorePayoutLines(store.id, from, to);
+  const grossSales = built.grossSales;
   const commissionRate = store.commissionRate || 12;
   const commissionAmount = Math.round(grossSales * commissionRate / 100);
-  const payoutAmount = grossSales - commissionAmount;
+  const payoutAmount = Math.round((grossSales - commissionAmount) * 100) / 100;
+  const orderCount = built.orderCount;
+  const itemCount = built.itemCount;
+  const lines = built.lines;
   let payout;
   if (existing && existing.status === 'pending' && bool(req.body.recalculate)) {
     existing.grossSales = grossSales;
@@ -746,7 +788,7 @@ app.post('/api/admin/payouts/calculate', adminAuth, async (req, res) => {
     await existing.save();
     payout = existing;
   } else {
-    payout = await Payout.create({ storeId: store.id, storeName: store.name, periodFrom: from, periodTo: to, grossSales, commissionRate, commissionAmount, payoutAmount, status: 'pending' });
+    payout = await Payout.create({ storeId: store.id, storeName: store.name, periodFrom: from, periodTo: to, grossSales, commissionRate, commissionAmount, payoutAmount, orderCount: typeof orderCount!=='undefined'?orderCount:0, itemCount: typeof itemCount!=='undefined'?itemCount:0, lines: typeof lines!=='undefined'?lines:[], status: 'pending', bankSnapshot: { bankAccountName: store.bankAccountName, bankName: store.bankName, bankAccountNumber: store.bankAccountNumber ? ('••••'+String(store.bankAccountNumber).slice(-4)) : null, bankBranchCode: store.bankBranchCode } });
   }
   await audit(req, 'calculate', 'payout', payout._id, `Calculated payout for ${store.name}: R${payoutAmount}`);
   res.status(201).json(payout);
@@ -756,6 +798,339 @@ app.put('/api/admin/payouts/:id', adminAuth, async (req, res) => {
   const status = clean(req.body.status, 30); if (['pending','approved','paid','failed'].includes(status)) payout.status = status; if (status === 'paid') payout.paidAt = new Date(); if (req.body.reference !== undefined) payout.reference = clean(req.body.reference, 120); await payout.save();
   await audit(req, 'update', 'payout', payout._id, `Payout ${payout.status}`); res.json(payout);
 });
+
+app.post('/api/admin/payouts/run-period', adminAuth, async (req, res) => {
+  try {
+    const from = req.body.periodFrom ? new Date(req.body.periodFrom) : null;
+    const to = req.body.periodTo ? new Date(req.body.periodTo) : null;
+    if (!from || !to || Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      return res.status(400).json({ error: 'periodFrom and periodTo are required.' });
+    }
+    const stores = await Store.find({ approvalStatus: 'approved' }).limit(500);
+    const created = [];
+    for (const store of stores) {
+      const existing = await Payout.findOne({ storeId: store.id, periodFrom: from, periodTo: to });
+      if (existing) continue;
+      const built = await buildStorePayoutLines(store.id, from, to);
+      if (built.grossSales <= 0) continue;
+      const commissionRate = store.commissionRate || 12;
+      const commissionAmount = Math.round(built.grossSales * commissionRate) / 100;
+      const payoutAmount = Math.round((built.grossSales - commissionAmount) * 100) / 100;
+      const payout = await Payout.create({
+        storeId: store.id, storeName: store.name, periodFrom: from, periodTo: to,
+        grossSales: built.grossSales, commissionRate, commissionAmount, payoutAmount,
+        itemCount: built.itemCount, orderCount: built.orderCount, lines: built.lines, status: 'pending',
+        bankSnapshot: {
+          bankAccountName: store.bankAccountName, bankName: store.bankName,
+          bankAccountNumber: store.bankAccountNumber ? ('••••' + String(store.bankAccountNumber).slice(-4)) : null,
+          bankBranchCode: store.bankBranchCode,
+          bankAccountType: store.bankAccountType || null
+        },
+        createdAt: new Date()
+      });
+      created.push(payout);
+    }
+    await audit(req, 'calculate', 'payout', 'period', `Ran payout period for ${created.length} stores`);
+    res.json({ ok: true, count: created.length, payouts: created });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+// ---- Minimal PDF writer (no external deps) for payout statements ----
+function pdfEscape(str) {
+  return String(str || '').replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+}
+function buildPayoutStatementPdf(statement) {
+  if (!statement || typeof statement !== 'object') {
+    throw new Error('PDF generation failed: missing statement data.');
+  }
+  try {
+  const pageW = 595; // A4
+  const pageH = 842;
+  const margin = 50;
+  const content = [];
+  let y = pageH - margin;
+
+  const drawText = (text, x, yy, size = 11) => {
+    const safe = String(text == null ? '' : text).slice(0, 120);
+    content.push(`BT /F1 ${size} Tf ${x} ${yy} Td (${pdfEscape(safe)}) Tj ET`);
+  };
+
+  const payout = statement.payout || {};
+  const store = statement.store || {};
+  const bank = statement.bank || {};
+  const orderLines = Array.isArray(statement.lines) ? statement.lines : [];
+  const fmtMoney = (n) => {
+    const v = Number(n);
+    return `R ${Number.isFinite(v) ? v.toFixed(2) : '0.00'}`;
+  };
+  const fmtDate = (d) => {
+    if (!d) return '—';
+    try {
+      const dt = new Date(d);
+      if (Number.isNaN(dt.getTime())) return '—';
+      return dt.toISOString().slice(0, 10);
+    } catch (e) { return '—'; }
+  };
+
+  drawText('BCM FoodHub', margin, y, 18); y -= 18;
+  drawText('Seller payout statement', margin, y, 12); y -= 28;
+
+  drawText(`Store: ${store.name || '—'}`, margin, y, 11); y -= 14;
+  drawText(`Period: ${fmtDate(payout.periodFrom)} to ${fmtDate(payout.periodTo)}`, margin, y, 11); y -= 14;
+  drawText(`Status: ${String(payout.status || '').toUpperCase()}${payout.paidAt ? '  |  Paid: ' + fmtDate(payout.paidAt) : ''}`, margin, y, 11); y -= 14;
+  drawText(`Reference: ${payout.reference || payout.id || '—'}`, margin, y, 11); y -= 14;
+  drawText(`Bank: ${bank.bankName || '—'}  ${bank.bankAccountNumber || bank.bankAccountNumberMasked || ''}`, margin, y, 11); y -= 14;
+  drawText(`Account name: ${bank.bankAccountName || '—'}`, margin, y, 11); y -= 22;
+
+  drawText('Order breakdown', margin, y, 13); y -= 16;
+  drawText('Order', margin, y, 10);
+  drawText('Date', margin + 120, y, 10);
+  drawText('Items', margin + 220, y, 10);
+  drawText('Gross', margin + 300, y, 10);
+  y -= 12;
+  content.push(`BT /F1 10 Tf ${margin} ${y} Td (${pdfEscape('-'.repeat(70))}) Tj ET`);
+  y -= 14;
+
+  if (!orderLines.length) {
+    drawText('No order lines for this period.', margin, y, 9);
+    y -= 14;
+  }
+
+  for (const line of orderLines.slice(0, 40)) {
+    if (y < 120) break;
+    try {
+      const detail = (line.items || []).map((i) => `${i.quantity}x ${i.productName}`).join(', ').slice(0, 60);
+      drawText(String(line.orderNumber || '—').slice(0, 18), margin, y, 9);
+      drawText(fmtDate(line.orderDate), margin + 120, y, 9);
+      drawText(String(line.itemCount || ''), margin + 220, y, 9);
+      drawText(fmtMoney(line.gross), margin + 300, y, 9);
+      y -= 11;
+      if (detail) { drawText(detail, margin, y, 8); y -= 12; }
+      else y -= 2;
+    } catch (lineErr) {
+      drawText('(order line omitted)', margin, y, 8);
+      y -= 12;
+    }
+  }
+  if (orderLines.length > 40) {
+    drawText(`... and ${orderLines.length - 40} more orders`, margin, y, 9);
+    y -= 14;
+  }
+
+  y -= 10;
+  drawText(`Gross sales: ${fmtMoney(payout.grossSales)}`, margin, y, 11); y -= 14;
+  drawText(`Commission (${payout.commissionRate}%): - ${fmtMoney(payout.commissionAmount)}`, margin, y, 11); y -= 14;
+  drawText(`Net payout: ${fmtMoney(payout.payoutAmount)}`, margin, y, 13); y -= 22;
+
+  const notes = Array.isArray(statement.notes) ? statement.notes : [];
+  drawText('Notes', margin, y, 11); y -= 14;
+  for (const n of notes) {
+    drawText(`* ${String(n).slice(0, 95)}`, margin, y, 8);
+    y -= 11;
+  }
+  y -= 16;
+  drawText(`Generated ${fmtDate(statement.generatedAt || new Date())} - BCM FoodHub marketplace`, margin, y, 8);
+
+  if (!content.length) {
+    throw new Error('PDF generation failed: empty document content.');
+  }
+
+  const stream = content.join('\n');
+  const objects = [];
+  objects.push('1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
+  objects.push('2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
+  objects.push(`3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageW} ${pageH}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n`);
+  objects.push(`4 0 obj\n<< /Length ${Buffer.byteLength(stream, 'utf8')} >>\nstream\n${stream}\nendstream\nendobj\n`);
+  objects.push('5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n');
+
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+  for (const obj of objects) {
+    offsets.push(Buffer.byteLength(pdf, 'utf8'));
+    pdf += obj;
+  }
+  const xrefPos = Buffer.byteLength(pdf, 'utf8');
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += '0000000000 65535 f \n';
+  for (let i = 1; i <= objects.length; i++) {
+    pdf += String(offsets[i]).padStart(10, '0') + ' 00000 n \n';
+  }
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF`;
+  const buf = Buffer.from(pdf, 'utf8');
+  if (!buf.length || buf.slice(0, 5).toString() !== '%PDF-') {
+    throw new Error('PDF generation failed: invalid output.');
+  }
+  return buf;
+  } catch (e) {
+    if (e && e.message && e.message.startsWith('PDF generation failed')) throw e;
+    throw new Error('PDF generation failed: ' + (e && e.message ? e.message : 'unknown error'));
+  }
+}
+
+app.get('/api/admin/payouts/:id/statement', adminAuth, async (req, res) => {
+  try {
+    const payout = await Payout.findById(req.params.id).lean();
+    if (!payout) return res.status(404).json({ error: 'Payout not found.' });
+    let lines = Array.isArray(payout.lines) ? payout.lines : [];
+    if (!lines.length && payout.periodFrom && payout.periodTo) {
+      const built = await buildStorePayoutLines(payout.storeId, new Date(payout.periodFrom), new Date(payout.periodTo));
+      lines = built.lines;
+    }
+    const store = await Store.findOne({ id: payout.storeId }).lean();
+    res.json({
+      statementTitle: 'BCM FoodHub — Seller payout statement',
+      generatedAt: new Date(),
+      payout: {
+        id: payout._id,
+        periodFrom: payout.periodFrom,
+        periodTo: payout.periodTo,
+        status: payout.status,
+        paidAt: payout.paidAt,
+        reference: payout.reference || null,
+        grossSales: payout.grossSales,
+        commissionRate: payout.commissionRate,
+        commissionAmount: payout.commissionAmount,
+        payoutAmount: payout.payoutAmount,
+        orderCount: payout.orderCount || lines.length,
+        itemCount: payout.itemCount || 0
+      },
+      store: { id: payout.storeId, name: payout.storeName, email: store?.email || null },
+      bank: payout.bankSnapshot || null,
+      lines,
+      notes: [
+        'Gross sales = store product lines on paid orders in the period.',
+        'Delivery fees and customer payment fees are excluded from seller gross.',
+        `Commission ${payout.commissionRate}% retained by BCM FoodHub.`
+      ]
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
+app.get('/api/admin/payouts/:id/statement.pdf', adminAuth, async (req, res) => {
+  try {
+    const retryCount = Number(req.get('X-Retry-Count') || 0);
+    const retryAttempt = Number(req.get('X-Retry-Attempt') || 1);
+    const retryMax = Number(req.get('X-Retry-Max') || 1);
+    if (retryCount > 0) {
+      console.warn(`[PDF] admin statement retry count=${retryCount} attempt=${retryAttempt}/${retryMax} payout=${req.params.id}`);
+    }
+    res.setHeader('X-Retry-Count', String(retryCount));
+    res.setHeader('X-Retry-Attempt', String(retryAttempt));
+    res.setHeader('X-Retry-Max', String(retryMax));
+    const payout = await Payout.findById(req.params.id).lean();
+    if (!payout) return res.status(404).json({ error: 'Payout not found.' });
+    let lines = Array.isArray(payout.lines) ? payout.lines : [];
+    if (!lines.length && payout.periodFrom && payout.periodTo) {
+      const built = await buildStorePayoutLines(payout.storeId, new Date(payout.periodFrom), new Date(payout.periodTo));
+      lines = built.lines;
+    }
+    const store = await Store.findOne({ id: payout.storeId }).lean();
+    const statement = {
+      statementTitle: 'BCM FoodHub — Seller payout statement',
+      generatedAt: new Date(),
+      payout: {
+        id: payout._id,
+        periodFrom: payout.periodFrom,
+        periodTo: payout.periodTo,
+        status: payout.status,
+        paidAt: payout.paidAt,
+        reference: payout.reference || null,
+        grossSales: payout.grossSales,
+        commissionRate: payout.commissionRate,
+        commissionAmount: payout.commissionAmount,
+        payoutAmount: payout.payoutAmount,
+        orderCount: payout.orderCount || lines.length,
+        itemCount: payout.itemCount || 0
+      },
+      store: { id: payout.storeId, name: payout.storeName, email: store?.email || null },
+      bank: payout.bankSnapshot || null,
+      lines,
+      notes: [
+        'Gross sales = store product lines on paid orders in the period.',
+        'Delivery fees and customer payment fees are excluded from seller gross.',
+        `Commission ${payout.commissionRate}% retained by BCM FoodHub.`
+      ]
+    };
+    let pdf;
+    try {
+      pdf = buildPayoutStatementPdf(statement);
+    } catch (pdfErr) {
+      console.error('admin statement.pdf build', pdfErr);
+      return res.status(500).json({ error: pdfErr.message || 'Could not generate PDF statement.', code: 'PDF_GENERATION_ERROR' });
+    }
+    if (!pdf || !Buffer.isBuffer(pdf) || pdf.length < 100) {
+      return res.status(500).json({ error: 'PDF generation produced an empty file.', code: 'PDF_EMPTY' });
+    }
+    const safeD = (d) => { try { return d ? new Date(d).toISOString().slice(0, 10) : 'na'; } catch (e) { return 'na'; } };
+    const filename = `BCM-payout-${payout.storeId || 'store'}-${safeD(payout.periodFrom)}-${safeD(payout.periodTo)}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', pdf.length);
+    res.send(pdf);
+  } catch (e) {
+    console.error('admin statement.pdf', e);
+    if (res.headersSent) return;
+    const msg = e && e.message ? e.message : 'PDF generation failed';
+    const status = /not found/i.test(msg) ? 404 : 500;
+    res.status(status).json({ error: msg, code: 'PDF_GENERATION_ERROR' });
+  }
+});
+
+app.put('/api/admin/payouts/:id/mark-paid', adminAuth, async (req, res) => {
+  try {
+    const payout = await Payout.findById(req.params.id);
+    if (!payout) return res.status(404).json({ error: 'Payout not found.' });
+    if (payout.status === 'paid') return res.json(payout);
+
+    const store = await Store.findOne({ id: payout.storeId });
+    const bankOk = !!(store && store.bankAccountNumber && store.bankName && store.bankAccountName);
+    if (!bankOk && !req.body.force) {
+      return res.status(400).json({
+        error: 'Store has incomplete bank details. Ask the store to complete Billing → bank account, or pass force=true to override.',
+        code: 'BANK_DETAILS_REQUIRED',
+        storeId: payout.storeId,
+        storeName: payout.storeName
+      });
+    }
+
+    payout.status = 'paid';
+    payout.paidAt = new Date();
+    if (req.body.reference !== undefined) payout.reference = clean(req.body.reference, 120);
+    await payout.save();
+
+    if (store?.ownerId) {
+      await Notification.create({
+        userId: store.ownerId, storeId: store.id, type: 'payout',
+        title: 'Payout sent',
+        message: `R${Number(payout.payoutAmount || 0).toFixed(2)} is on the way. Ref: ${payout.reference || '—'}`,
+        link: '/billing', read: false, createdAt: new Date()
+      }).catch(() => {});
+      try {
+        const owner = await User.findById(store.ownerId).select('email name');
+        if (owner?.email && typeof sendEmail === 'function') {
+          await sendEmail({
+            to: owner.email,
+            subject: `Payout sent — ${store.name || 'your store'}`,
+            text: `Hi ${owner.name || 'there'},\n\nBCM FoodHub has marked a payout as paid.\n\nStore: ${store.name}\nAmount: R${Number(payout.payoutAmount || 0).toFixed(2)}\nPeriod: ${payout.periodFrom ? new Date(payout.periodFrom).toISOString().slice(0,10) : '—'} to ${payout.periodTo ? new Date(payout.periodTo).toISOString().slice(0,10) : '—'}\nReference: ${payout.reference || '—'}\n\nLog in to Store Admin → Billing to download your statement PDF.\n\nBCM FoodHub`
+          }).catch((e) => console.warn('payout email', e.message));
+        }
+      } catch (mailErr) {
+        console.warn('payout notify email', mailErr.message);
+      }
+    }
+    await audit(req, 'pay', 'payout', payout._id, `Paid R${payout.payoutAmount} ref ${payout.reference || ''}`);
+    res.json(payout);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 app.get('/api/admin/reviews', adminAuth, async (req, res) => res.json(await Review.find({}).populate('userId','name email').sort({ createdAt: -1 }).limit(400)));
 app.put('/api/admin/reviews/:id', adminAuth, async (req, res) => {
   const review = await Review.findById(req.params.id); if (!review) return res.status(404).json({ error: 'Review not found.' });
@@ -929,11 +1304,14 @@ app.get('/api/admin/settings', adminAuth, async (req, res) => {
   const settings = await PlatformSettings.find({}); const map = {}; settings.forEach(item => map[item.key] = item.value); res.json(map);
 });
 app.put('/api/admin/settings', adminAuth, async (req, res) => {
-  const allowed = { deliveryFee: 'Nationwide delivery fee', freeDeliveryAbove: 'Free delivery threshold', commissionDefault: 'Default store commission percentage', cutoffHour: 'Default order cutoff time', supportEmail: 'Marketplace support email' };
+  const allowed = { deliveryFee: 'Nationwide delivery fee', freeDeliveryAbove: 'Free delivery threshold', commissionDefault: 'Default store commission percentage', cutoffHour: 'Default order cutoff time', supportEmail: 'Marketplace support email', listingFeeMonthly: 'Monthly store listing fee (ZAR)', listingTrialDays: 'Free trial days for new stores', listingAutoApprove: 'Auto-approve store when listing fee is paid', listingGraceDays: 'Days after paid-until before suspend', paymentFeeEnabled: 'Pass gateway fees to customer at checkout', paymentFeePercent: 'Payment fee percent (covers PayFast)', paymentFeeFixed: 'Fixed payment fee ZAR', paymentFeeLabel: 'Checkout fee label' };
   const output = {};
   for (const [key, description] of Object.entries(allowed)) {
     if (req.body[key] === undefined) continue;
-    const value = ['deliveryFee','freeDeliveryAbove','commissionDefault'].includes(key) ? Math.max(0, num(req.body[key])) : clean(req.body[key], 160);
+    let value;
+    if (['deliveryFee','freeDeliveryAbove','commissionDefault','listingFeeMonthly','listingTrialDays','listingGraceDays','paymentFeePercent','paymentFeeFixed'].includes(key)) value = Math.max(0, num(req.body[key]));
+    else if (key === 'listingAutoApprove' || key === 'paymentFeeEnabled') value = req.body[key] === true || req.body[key] === 'true' || req.body[key] === '1';
+    else value = clean(req.body[key], 160);
     const setting = await PlatformSettings.findOneAndUpdate({ key }, { value, description, updatedAt: new Date() }, { upsert: true, new: true, setDefaultsOnInsert: true }); output[key] = setting.value;
   }
   await audit(req, 'update', 'settings', 'platform', 'Updated marketplace settings'); res.json(output);
@@ -1056,8 +1434,51 @@ async function bootstrapAdmin() {
 mongoose.connect(MONGO_URI).then(async () => {
   console.log('✅ MongoDB connected — BCM FoodHub Super Admin');
   try { await bootstrapAdmin(); } catch (error) { console.error('Admin bootstrap error:', error.message); }
+  try {
+    const listingSeeds = [
+      { key: 'listingFeeMonthly', value: 99, description: 'Monthly store listing fee (ZAR)' },
+      { key: 'listingTrialDays', value: 14, description: 'Free trial days for new stores' },
+      { key: 'listingAutoApprove', value: true, description: 'Auto-approve store when listing fee is paid' },
+      { key: 'listingGraceDays', value: 7, description: 'Days after paid-until before suspend' }
+    ];
+    for (const s of listingSeeds) {
+      await PlatformSettings.findOneAndUpdate({ key: s.key }, { $setOnInsert: s }, { upsert: true });
+    }
+  } catch (e) { console.warn('listing settings seed', e.message); }
 }).catch(error => console.error('MongoDB connection error:', error.message));
 
+
+
+app.get('/api/admin/launch-checklist', adminAuth, async (req, res) => {
+  try {
+    const live = String(process.env.PAYFAST_MODE || '').toLowerCase() === 'live'
+      || (process.env.NODE_ENV === 'production' && String(process.env.PAYFAST_MODE || '') !== 'sandbox');
+    const checks = [
+      { id: 'mongo', label: 'MongoDB connected', ok: mongoose.connection.readyState === 1 },
+      { id: 'jwt', label: 'JWT_SECRET set (not default)', ok: !!(process.env.JWT_SECRET && process.env.JWT_SECRET.length >= 16 && !/change|secret|default/i.test(process.env.JWT_SECRET)) },
+      { id: 'payfast_merchant', label: 'PayFast merchant ID/key set', ok: !!(process.env.PF_MERCHANT_ID && process.env.PF_MERCHANT_KEY) },
+      { id: 'payfast_passphrase', label: 'PayFast passphrase set', ok: !!process.env.PF_PASSPHRASE },
+      { id: 'payfast_mode', label: 'PayFast mode', ok: true, detail: live ? 'live' : 'sandbox' },
+      { id: 'notify_url', label: 'PF_NOTIFY_URL or public URL for order ITN', ok: !!(process.env.PF_NOTIFY_URL || process.env.APP_PUBLIC_URL) },
+      { id: 'listing_notify', label: 'PF_LISTING_NOTIFY_URL (store admin)', ok: !!process.env.PF_LISTING_NOTIFY_URL, optional: true },
+      { id: 'email', label: 'Email transport configured', ok: !!(process.env.SMTP_HOST || process.env.RESEND_API_KEY || process.env.EMAIL_FROM) },
+      { id: 'stores', label: 'At least one approved store', ok: (await Store.countDocuments({ approvalStatus: 'approved' })) > 0 },
+      { id: 'products', label: 'At least one active product', ok: (await Product.countDocuments({ active: true })) > 0 },
+    ];
+    const required = checks.filter((c) => !c.optional);
+    const ready = required.every((c) => c.ok);
+    res.json({
+      ready,
+      mode: live ? 'live' : 'sandbox',
+      checks,
+      nextSteps: ready
+        ? ['Run a sandbox/live test order', 'Confirm ITN marks Paid', 'Pay one listing fee', 'Run one payout period']
+        : ['Fix failed checks below', 'Set production env vars on your host', 'Retest /api/admin/launch-checklist']
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 app.get('/api/health', (req, res) => {
   res.status(mongoose.connection.readyState === 1 ? 200 : 503).json({
