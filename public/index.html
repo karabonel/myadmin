@@ -42,42 +42,103 @@
       link.download = filename;
       link.click();
     };
-    const printRemittanceSlip = (payout) => {
-      const popup = window.open('', '_blank', 'width=750,height=800');
+    const printRemittanceSlip = async (payout) => {
+      let stmt = null;
+      try {
+        stmt = await api(`/api/admin/payouts/${payout._id}/statement`);
+      } catch (e) {
+        console.warn('statement', e);
+      }
+      const popup = window.open('', '_blank', 'width=750,height=900');
       if (!popup) return window.alert('Please allow pop-ups to print the remittance slip.');
-      popup.document.write(`<html><head><title>Payout Remittance - ${payout.storeName}</title>
+      const lines = (stmt && stmt.lines) || [];
+      const bank = (stmt && stmt.bank) || payout.bankSnapshot || {};
+      const lineRows = lines.map(l => `<tr><td>${l.orderNumber||''}<div style="font-size:11px;color:#666">${(l.items||[]).map(i=>i.quantity+'× '+i.productName).join(', ')}</div></td><td>${date(l.orderDate)}</td><td>${l.itemCount||''}</td><td>R ${Number(l.gross||0).toFixed(2)}</td></tr>`).join('')
+        || '<tr><td colspan="4">No order lines</td></tr>';
+      popup.document.write(`<html><head><title>Payout statement - ${payout.storeName}</title>
         <style>
           body { font: 14px Arial, sans-serif; padding: 40px; color: #17261c; }
           h1 { color: #0b7a43; margin-bottom: 4px; }
           .meta { color: #555; margin-bottom: 24px; font-size: 13px; }
           table { width: 100%; border-collapse: collapse; margin: 24px 0; }
-          th, td { padding: 12px; border-bottom: 1px solid #ddd; text-align: left; }
+          th, td { padding: 10px; border-bottom: 1px solid #ddd; text-align: left; font-size: 13px; }
           th { background: #f4fbf5; color: #0b7a43; }
           .total-row td { font-weight: bold; font-size: 16px; border-top: 2px solid #0b7a43; }
           .footer { margin-top: 40px; font-size: 12px; color: #777; border-top: 1px solid #eee; padding-top: 12px; }
         </style></head>
         <body>
           <h1>BCM FoodHub</h1>
-          <div class="meta"><strong>Seller Payout Remittance Advice</strong><br/>Generated: ${new Date().toLocaleDateString('en-ZA')}</div>
+          <div class="meta"><strong>Seller payout statement</strong><br/>Generated: ${new Date().toLocaleDateString('en-ZA')}</div>
           <p><strong>Store:</strong> ${payout.storeName}<br/>
              <strong>Period:</strong> ${date(payout.periodFrom)} – ${date(payout.periodTo)}<br/>
-             <strong>Status:</strong> ${String(payout.status || '').toUpperCase()}<br/>
-             <strong>Reference:</strong> ${payout.reference || '—'}</p>
+             <strong>Status:</strong> ${String(payout.status || '').toUpperCase()}${payout.paidAt ? ' · paid '+date(payout.paidAt) : ''}<br/>
+             <strong>Reference:</strong> ${payout.reference || '—'}<br/>
+             <strong>Bank:</strong> ${bank.bankName || '—'} ${bank.bankAccountNumber || bank.bankAccountNumberMasked || ''}<br/>
+             <strong>Account name:</strong> ${bank.bankAccountName || '—'}</p>
           <table>
-            <thead><tr><th>Description</th><th>Rate / Info</th><th>Amount (R)</th></tr></thead>
-            <tbody>
-              <tr><td>Gross Marketplace Sales</td><td>Period total</td><td>R${Number(payout.grossSales || 0).toFixed(2)}</td></tr>
-              <tr><td>BCM FoodHub Commission</td><td>${payout.commissionRate || 12}%</td><td>- R${Number(payout.commissionAmount || 0).toFixed(2)}</td></tr>
-              <tr class="total-row"><td>Net Seller Payout</td><td>Amount to transfer</td><td>R${Number(payout.payoutAmount || 0).toFixed(2)}</td></tr>
-            </tbody>
+            <thead><tr><th>Order</th><th>Date</th><th>Items</th><th>Gross</th></tr></thead>
+            <tbody>${lineRows}</tbody>
           </table>
-          <div class="footer">Thank you for partnering with BCM FoodHub. If you have questions regarding this remittance, please contact marketplace finance at finance@bcmfoodhub.co.za.</div>
+          <table>
+            <tr><td>Gross sales</td><td>R ${Number(payout.grossSales||0).toFixed(2)}</td></tr>
+            <tr><td>Commission (${payout.commissionRate}%)</td><td>− R ${Number(payout.commissionAmount||0).toFixed(2)}</td></tr>
+            <tr class="total-row"><td>Net payout to seller</td><td>R ${Number(payout.payoutAmount||0).toFixed(2)}</td></tr>
+          </table>
+          <div class="footer">BCM FoodHub marketplace remittance. Gross excludes delivery and customer payment fees. Retain for your records.</div>
         </body></html>`);
       popup.document.close();
       popup.focus();
-      popup.print();
+      setTimeout(() => popup.print(), 300);
     };
+
     const api = (path, options={}) => { const token=localStorage.getItem('bcm_super_admin_token'); const headers={'Content-Type':'application/json',...(options.headers||{})}; if(token)headers.Authorization=`Bearer ${token}`; return fetch(path,{...options,headers}).then(async response=>{const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||'Request failed');return data;}); };
+
+  const fetchWithRetry = async (url, options = {}, { retries = 3, delayMs = 600, retryOn = null } = {}) => {
+    let lastErr;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const baseHeaders = (options && options.headers) ? options.headers : {};
+        const headers = {
+          ...baseHeaders,
+          'X-Retry-Count': String(attempt - 1),
+          'X-Retry-Attempt': String(attempt),
+          'X-Retry-Max': String(retries)
+        };
+        const response = await fetch(url, { ...options, headers });
+        // Expose attempt info for callers/debugging
+        try {
+          response.headers.set && response.headers.set('X-Client-Retry-Attempt', String(attempt));
+        } catch (e) { /* response headers are immutable in browsers */ }
+        response._retryAttempt = attempt;
+        response._retryCount = attempt - 1;
+        const shouldRetry = retryOn
+          ? retryOn(response, null, attempt)
+          : (!response.ok && response.status >= 500);
+        if (shouldRetry && attempt < retries) {
+          await new Promise((r) => setTimeout(r, delayMs * attempt));
+          continue;
+        }
+        return response;
+      } catch (err) {
+        lastErr = err;
+        if (err && typeof err === 'object') {
+          err._retryAttempt = attempt;
+          err._retryCount = attempt - 1;
+          err._retryMax = retries;
+        }
+        if (attempt >= retries) break;
+        await new Promise((r) => setTimeout(r, delayMs * attempt));
+      }
+    }
+    const fail = lastErr || new Error('Request failed after retries');
+    if (fail && typeof fail === 'object') {
+      fail._retryAttempt = retries;
+      fail._retryCount = retries - 1;
+      fail._retryMax = retries;
+    }
+    throw fail;
+  };
+
     const Status=({children})=><span className={`status ${String(children||'draft').toLowerCase().replaceAll(' ','-')}`}>{children}</span>;
     const Field=({label,children,full=false})=><div className={`field ${full?'full':''}`}><label>{label}</label>{children}</div>;
     const Empty=({children})=><div className="empty">{children}</div>;
@@ -196,7 +257,28 @@
 
     function Coupons({notify}){const [items,setItems]=useState([]);const [form,setForm]=useState(null);const load=()=>api('/api/admin/coupons').then(setItems).catch(e=>notify(e.message,'error'));useEffect(()=>{load();},[]);const save=()=>{const method=form._id?'PUT':'POST';const url=form._id?`/api/admin/coupons/${form._id}`:'/api/admin/coupons';api(url,{method,body:JSON.stringify(form)}).then(()=>{notify('Promotion saved.');setForm(null);load();}).catch(e=>notify(e.message,'error'));};return <><div className="page-head"><div><h2>Promotions & coupons</h2><p>Create discount codes customers can apply at checkout.</p></div><button className="btn primary" onClick={()=>setForm({code:'',description:'',discountType:'percent',discountValue:10,minOrderAmount:0,maxUses:100,active:true})}>Create coupon</button></div><section className="panel"><div className="table-wrap"><table className="table"><thead><tr><th>Code</th><th>Offer</th><th>Minimum</th><th>Uses</th><th>Expiry</th><th>Status</th><th></th></tr></thead><tbody>{items.map(item=><tr key={item._id}><td><strong>{item.code}</strong><br/><span className="tiny muted">{item.description}</span></td><td>{item.discountType==='percent'?`${item.discountValue}%`:money(item.discountValue)}</td><td>{money(item.minOrderAmount||0)}</td><td>{item.usedCount||0}/{item.maxUses||'—'}</td><td>{date(item.validTo)}</td><td><Status>{item.active?'Active':'Inactive'}</Status></td><td><button className="btn light small" onClick={()=>setForm({...item,validFrom:item.validFrom?.slice?.(0,10)||'',validTo:item.validTo?.slice?.(0,10)||''})}>Edit</button></td></tr>)}</tbody></table>{!items.length&&<Empty>No coupons yet.</Empty>}</div></section>{form&&<Drawer title={form._id?'Edit coupon':'New coupon'} close={()=>setForm(null)}><div className="form-grid"><Field label="Code"><input value={form.code||''} onChange={e=>setForm({...form,code:e.target.value.toUpperCase()})}/></Field><Field label="Discount type"><select value={form.discountType||'percent'} onChange={e=>setForm({...form,discountType:e.target.value})}><option value="percent">Percent</option><option value="fixed">Fixed amount</option></select></Field><Field label="Discount value"><input type="number" value={form.discountValue??0} onChange={e=>setForm({...form,discountValue:e.target.value})}/></Field><Field label="Minimum order"><input type="number" value={form.minOrderAmount??0} onChange={e=>setForm({...form,minOrderAmount:e.target.value})}/></Field><Field label="Maximum uses"><input type="number" value={form.maxUses??100} onChange={e=>setForm({...form,maxUses:e.target.value})}/></Field><Field label="Maximum discount"><input type="number" value={form.maxDiscount??''} onChange={e=>setForm({...form,maxDiscount:e.target.value})}/></Field><Field label="Valid from"><input type="date" value={form.validFrom||''} onChange={e=>setForm({...form,validFrom:e.target.value})}/></Field><Field label="Valid to"><input type="date" value={form.validTo||''} onChange={e=>setForm({...form,validTo:e.target.value})}/></Field><Field full label="Description"><textarea value={form.description||''} onChange={e=>setForm({...form,description:e.target.value})}/></Field></div><label className="tiny"><input type="checkbox" checked={form.active!==false} onChange={e=>setForm({...form,active:e.target.checked})}/> Coupon is active</label><button className="btn primary" style={{marginTop:15}} onClick={save}>Save coupon</button></Drawer>}</>}
 
-    function Payouts({notify}){const [items,setItems]=useState([]);const [stores,setStores]=useState([]);const [form,setForm]=useState({storeId:'',periodFrom:'',periodTo:''});const load=()=>{api('/api/admin/payouts').then(setItems).catch(e=>notify(e.message,'error'));api('/api/admin/stores?status=all').then(setStores).catch(()=>{});};useEffect(()=>{load();},[]);const calculate=()=>api('/api/admin/payouts/calculate',{method:'POST',body:JSON.stringify(form)}).then(()=>{notify('Payout calculated.');setForm({storeId:'',periodFrom:'',periodTo:''});load();}).catch(e=>notify(e.message,'error'));const update=(payout,status)=>{const reference=status==='paid'?window.prompt('Payout reference (optional):')||'':'';api(`/api/admin/payouts/${payout._id}`,{method:'PUT',body:JSON.stringify({status,reference})}).then(()=>{notify(`Payout marked ${status}.`);load();}).catch(e=>notify(e.message,'error'));};return <><div className="page-head"><div><h2>Payouts & finance</h2><p>Calculate seller earnings, approve payouts and reconcile payment status.</p></div><button className="btn outline small" style={{marginRight:8}} onClick={()=>downloadCSV('bcm_payouts.csv', ['Store', 'From', 'To', 'Gross Sales', 'Commission Rate', 'Commission Amount', 'Payout Amount', 'Status', 'Reference'], items.map(item => [item.storeName, date(item.periodFrom), date(item.periodTo), item.grossSales, item.commissionRate, item.commissionAmount, item.payoutAmount, item.status, item.reference]))}>Download CSV</button></div><section className="grid"><div className="panel"><h3>Calculate seller payout</h3><p className="panel-sub">Gross sales less the store’s marketplace commission for the chosen period.</p><Field label="Store"><select value={form.storeId} onChange={e=>setForm({...form,storeId:e.target.value})}><option value="">Choose a store</option>{stores.filter(store=>store.approvalStatus==='approved').map(store=><option key={store.id} value={store.id}>{store.name}</option>)}</select></Field><div className="form-grid"><Field label="From"><input type="date" value={form.periodFrom} onChange={e=>setForm({...form,periodFrom:e.target.value})}/></Field><Field label="To"><input type="date" value={form.periodTo} onChange={e=>setForm({...form,periodTo:e.target.value})}/></Field></div><button className="btn primary" onClick={calculate}>Calculate payout</button></div><div className="panel"><h3>Finance status</h3><div className="data-line"><span>Pending payouts</span><strong>{items.filter(item=>item.status==='pending').length}</strong></div><div className="data-line"><span>Approved payouts</span><strong>{items.filter(item=>item.status==='approved').length}</strong></div><div className="data-line"><span>Paid payouts</span><strong>{items.filter(item=>item.status==='paid').length}</strong></div></div></section><section className="panel" style={{marginTop:15}}><h3>Payout history</h3><div className="table-wrap"><table className="table"><thead><tr><th>Store</th><th>Period</th><th>Gross sales</th><th>Commission</th><th>Seller payout</th><th>Status</th><th></th></tr></thead><tbody>{items.map(item=><tr key={item._id}><td><strong>{item.storeName}</strong></td><td>{date(item.periodFrom)} – {date(item.periodTo)}</td><td>{money(item.grossSales)}</td><td>{money(item.commissionAmount)} ({item.commissionRate}%)</td><td><strong>{money(item.payoutAmount)}</strong></td><td><Status>{item.status}</Status></td><td><div className="row-actions">{item.status==='pending'&&<button className="btn gold small" onClick={()=>update(item,'approved')}>Approve</button>}{item.status==='approved'&&<button className="btn primary small" onClick={()=>update(item,'paid')}>Mark paid</button>}{(item.status==='approved'||item.status==='paid')&&<button className="btn outline small" onClick={()=>printRemittanceSlip(item)}>Remittance slip</button>}</div></td></tr>)}</tbody></table>{!items.length&&<Empty>No payout calculations yet.</Empty>}</div></section></>}
+    function Payouts({notify}){const [items,setItems]=useState([]);const [stores,setStores]=useState([]);const [form,setForm]=useState({storeId:'',periodFrom:'',periodTo:''});const load=()=>{api('/api/admin/payouts').then(setItems).catch(e=>notify(e.message,'error'));api('/api/admin/stores?status=all').then(setStores).catch(()=>{});};useEffect(()=>{load();},[]);const calculate=()=>api('/api/admin/payouts/calculate',{method:'POST',body:JSON.stringify(form)}).then(()=>{notify('Payout calculated.');setForm({storeId:'',periodFrom:'',periodTo:''});load();}).catch(e=>notify(e.message,'error'));const update=async(payout,status)=>{
+      try{
+        if(status==='paid'){
+          const reference=window.prompt('Bank/EFT reference (optional):')||'';
+          try{
+            await api(`/api/admin/payouts/${payout._id}/mark-paid`,{method:'PUT',body:JSON.stringify({reference})});
+          }catch(err){
+            if(String(err.message||'').includes('bank details')||String(err.message||'').includes('BANK_DETAILS')){
+              if(window.confirm(err.message+'\n\nMark paid anyway (force)?')){
+                await api(`/api/admin/payouts/${payout._id}/mark-paid`,{method:'PUT',body:JSON.stringify({reference,force:true})});
+              }else return;
+            }else throw err;
+          }
+          notify('Payout marked paid. Store notified.');
+          load();
+          return;
+        }
+        await api(`/api/admin/payouts/${payout._id}`,{method:'PUT',body:JSON.stringify({status})});
+        notify(`Payout marked ${status}.`);
+        load();
+      }catch(e){notify(e.message,'error');}
+    };return <><div className="page-head"><div><h2>Payouts & finance</h2><p>Calculate seller earnings, approve payouts and reconcile payment status.</p></div><button className="btn outline small" style={{marginRight:8}} onClick={()=>downloadCSV('bcm_payouts.csv', ['Store', 'From', 'To', 'Gross Sales', 'Commission Rate', 'Commission Amount', 'Payout Amount', 'Status', 'Reference'], items.map(item => [item.storeName, date(item.periodFrom), date(item.periodTo), item.grossSales, item.commissionRate, item.commissionAmount, item.payoutAmount, item.status, item.reference]))}>Download CSV</button></div><section className="grid"><div className="panel"><h3>Calculate seller payout</h3><p className="panel-sub">Gross sales less the store’s marketplace commission for the chosen period.</p><Field label="Store"><select value={form.storeId} onChange={e=>setForm({...form,storeId:e.target.value})}><option value="">Choose a store</option>{stores.filter(store=>store.approvalStatus==='approved').map(store=><option key={store.id} value={store.id}>{store.name}</option>)}</select></Field><div className="form-grid"><Field label="From"><input type="date" value={form.periodFrom} onChange={e=>setForm({...form,periodFrom:e.target.value})}/></Field><Field label="To"><input type="date" value={form.periodTo} onChange={e=>setForm({...form,periodTo:e.target.value})}/></Field></div><button className="btn primary" onClick={calculate}>Calculate payout</button></div><div className="panel"><h3>Finance status</h3><div className="data-line"><span>Pending payouts</span><strong>{items.filter(item=>item.status==='pending').length}</strong></div><div className="data-line"><span>Approved payouts</span><strong>{items.filter(item=>item.status==='approved').length}</strong></div><div className="data-line"><span>Paid payouts</span><strong>{items.filter(item=>item.status==='paid').length}</strong></div></div></section><section className="panel" style={{marginTop:15}}><h3>Payout history</h3><div className="table-wrap"><table className="table"><thead><tr><th>Store</th><th>Period</th><th>Gross sales</th><th>Commission</th><th>Seller payout</th><th>Status</th><th></th></tr></thead><tbody>{items.map(item=><tr key={item._id}><td><strong>{item.storeName}</strong></td><td>{date(item.periodFrom)} – {date(item.periodTo)}</td><td>{money(item.grossSales)}</td><td>{money(item.commissionAmount)} ({item.commissionRate}%)</td><td><strong>{money(item.payoutAmount)}</strong></td><td><Status>{item.status}</Status></td><td><div className="row-actions">{item.status==='pending'&&<button className="btn gold small" onClick={()=>update(item,'approved')}>Approve</button>}{item.status==='approved'&&<button className="btn primary small" onClick={()=>update(item,'paid')}>Mark paid</button>}{(item.status==='pending'||item.status==='approved'||item.status==='paid')&&<button className="btn outline small" onClick={()=>printRemittanceSlip(item)}>Statement</button>}{(item.status==='pending'||item.status==='approved'||item.status==='paid')&&<button className="btn primary small" onClick={async()=>{try{if(!item._id)throw new Error('Missing payout id.');const token=localStorage.getItem('bcm_super_admin_token')||localStorage.getItem('token')||'';if(!token)throw new Error('Please log in again to download the PDF.');if(typeof notify==='function')notify('Preparing PDF…');const r=await fetchWithRetry(`/api/admin/payouts/${item._id}/statement.pdf`,{headers:{Authorization:`Bearer ${token}`}},{retries:3,delayMs:700,retryOn:(response)=>!response||[408,429,500,502,503,504].includes(response.status)});const ctype=(r.headers.get('content-type')||'').toLowerCase();if(!r.ok){let msg='PDF download failed';if(ctype.includes('application/json')){const data=await r.json().catch(()=>({}));msg=data.error||data.message||msg;}else{msg=`PDF download failed (${r.status})`;}if(r.status===401||r.status===403)msg='Please log in again to download the PDF.';if(r.status===404)msg='Payout statement not found.';throw new Error(msg);}const blob=await r.blob();if(!blob||blob.size<50)throw new Error('PDF file was empty after retries. Try Statement print instead.');const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=`BCM-payout-${(item.storeName||'store').replace(/[^a-z0-9-_]+/gi,'_')}.pdf`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000);if(typeof notify==='function')notify('PDF downloaded');}catch(e){if(typeof notify==='function')notify(e.message||'PDF failed after retries','error');else window.alert(e.message||'PDF failed after retries');}}}>PDF</button>}</div></td></tr>)}</tbody></table>{!items.length&&<Empty>No payout calculations yet.</Empty>}</div></section></>}
 
     function Reviews({notify}){const [items,setItems]=useState([]);const [selected,setSelected]=useState(null);const [response,setResponse]=useState('');const load=()=>api('/api/admin/reviews').then(setItems).catch(e=>notify(e.message,'error'));useEffect(()=>{load();},[]);const save=()=>api(`/api/admin/reviews/${selected._id}`,{method:'PUT',body:JSON.stringify({approved:selected.approved,adminResponse:response})}).then(()=>{notify('Review moderation saved.');setSelected(null);setResponse('');load();}).catch(e=>notify(e.message,'error'));return <><div className="page-head"><div><h2>Reviews & ratings</h2><p>Moderate abusive content, resolve reports and review marketplace feedback.</p></div><button className="btn light" onClick={load}>Refresh</button></div><section className="panel"><div className="table-wrap"><table className="table"><thead><tr><th>Customer</th><th>Review</th><th>Rating</th><th>Store</th><th>Visibility</th><th></th></tr></thead><tbody>{items.map(item=><tr key={item._id}><td>{item.userId?.name||'Customer'}<br/><span className="tiny muted">{item.userId?.email}</span></td><td><strong>{item.title||'Review'}</strong><br/><span className="tiny muted">{item.comment?.slice(0,100)}</span></td><td>★ {item.rating}</td><td>{item.storeId||'—'}</td><td><Status>{item.approved?'Active':'Hidden'}</Status></td><td><button className="btn light small" onClick={()=>{setSelected(item);setResponse(item.adminResponse?.message||'')}}>Moderate</button></td></tr>)}</tbody></table>{!items.length&&<Empty>No reviews yet.</Empty>}</div></section>{selected&&<Drawer title="Moderate review" close={()=>setSelected(null)}><div className="notice info"><strong>{selected.userId?.name||'Customer'} · ★ {selected.rating}</strong><br/>{selected.title}<br/>{selected.comment}</div><label className="tiny"><input type="checkbox" checked={selected.approved!==false} onChange={e=>setSelected({...selected,approved:e.target.checked})}/> Keep this review visible</label><Field label="Admin response / resolution note"><textarea value={response} onChange={e=>setResponse(e.target.value)} placeholder="Optional response or report resolution note"/></Field><button className="btn primary" onClick={save}>Save moderation</button></Drawer>}</>}
 
@@ -312,7 +394,26 @@
       {selected&&<Drawer title={selected.subject} close={()=>setSelected(null)}><div className="data-line"><span>Customer</span><strong>{selected.userId?.name||selected.storeId} · {selected.userId?.email}</strong></div><div className="section-label">Customer message</div><p className="tiny" style={{lineHeight:1.6}}>{selected.message}</p>{selected.responses?.map((response,index)=><div key={index} className="panel" style={{padding:11,marginTop:8,background:response.sender==='admin'?'#1b3d27':'#1a2e20'}}><strong className="tiny">{response.sender}</strong><p className="tiny" style={{margin:'4px 0'}}>{response.message}</p></div>)}<div className="form-grid" style={{marginTop:15}}><Field label="Status"><select value={selected.status} onChange={e=>setSelected({...selected,status:e.target.value})}><option value="open">Open</option><option value="pending">Pending</option><option value="resolved">Resolved</option><option value="closed">Closed</option></select></Field><Field label="Priority"><select value={selected.priority} onChange={e=>setSelected({...selected,priority:e.target.value})}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option></select></Field><Field full label="Reply"><textarea value={reply} onChange={e=>setReply(e.target.value)} placeholder="Write a helpful response…"/></Field></div><button className="btn primary" onClick={save}>Save / send reply</button></Drawer>}</>;
     }
 
-    function Settings({notify}){const [form,setForm]=useState(null);useEffect(()=>{api('/api/admin/settings').then(settings=>setForm({deliveryFee:settings.deliveryFee??85,freeDeliveryAbove:settings.freeDeliveryAbove??1000,commissionDefault:settings.commissionDefault??12,cutoffHour:settings.cutoffHour||'14:00',supportEmail:settings.supportEmail||''})).catch(e=>notify(e.message,'error'));},[]);if(!form)return <Empty>Loading platform settings…</Empty>;const save=()=>api('/api/admin/settings',{method:'PUT',body:JSON.stringify(form)}).then(()=>notify('Marketplace settings saved.')).catch(e=>notify(e.message,'error'));return <><div className="page-head"><div><h2>Marketplace settings</h2><p>Shared checkout and marketplace defaults.</p></div></div><section className="panel" style={{maxWidth:760}}><div className="form-grid"><Field label="Nationwide delivery fee (R)"><input type="number" value={form.deliveryFee} onChange={e=>setForm({...form,deliveryFee:e.target.value})}/></Field><Field label="Free delivery threshold (R)"><input type="number" value={form.freeDeliveryAbove} onChange={e=>setForm({...form,freeDeliveryAbove:e.target.value})}/></Field><Field label="Default commission (%)"><input type="number" value={form.commissionDefault} onChange={e=>setForm({...form,commissionDefault:e.target.value})}/></Field><Field label="Default order cutoff"><input value={form.cutoffHour} onChange={e=>setForm({...form,cutoffHour:e.target.value})}/></Field><Field full label="Support email"><input type="email" value={form.supportEmail} onChange={e=>setForm({...form,supportEmail:e.target.value})}/></Field></div><button className="btn primary" onClick={save}>Save platform settings</button></section></>}
+    function Settings({notify}){const [form,setForm]=useState(null);useEffect(()=>{api('/api/admin/settings').then(settings=>setForm({deliveryFee:settings.deliveryFee??85,freeDeliveryAbove:settings.freeDeliveryAbove??1000,commissionDefault:settings.commissionDefault??12,cutoffHour:settings.cutoffHour||'14:00',supportEmail:settings.supportEmail||'',listingFeeMonthly:settings.listingFeeMonthly??99,listingTrialDays:settings.listingTrialDays??14,listingAutoApprove:settings.listingAutoApprove===true||settings.listingAutoApprove==='true'||settings.listingAutoApprove===undefined,listingGraceDays:settings.listingGraceDays??7,paymentFeeEnabled:settings.paymentFeeEnabled!==false&&settings.paymentFeeEnabled!=='false',paymentFeePercent:settings.paymentFeePercent??3.5,paymentFeeFixed:settings.paymentFeeFixed??2,paymentFeeLabel:settings.paymentFeeLabel||'Service & payment fees'})).catch(e=>notify(e.message,'error'));},[]);if(!form)return <Empty>Loading platform settings…</Empty>;const save=()=>api('/api/admin/settings',{method:'PUT',body:JSON.stringify(form)}).then(()=>notify('Marketplace settings saved.')).catch(e=>notify(e.message,'error'));return <><div className="page-head"><div><h2>Marketplace settings</h2><p>Shared checkout, listing fees and marketplace defaults.</p></div></div><section className="panel" style={{maxWidth:760}}><div className="form-grid"><Field label="Nationwide delivery fee (R)"><input type="number" value={form.deliveryFee} onChange={e=>setForm({...form,deliveryFee:e.target.value})}/></Field><Field label="Free delivery threshold (R)"><input type="number" value={form.freeDeliveryAbove} onChange={e=>setForm({...form,freeDeliveryAbove:e.target.value})}/></Field><Field label="Default commission (%)"><input type="number" value={form.commissionDefault} onChange={e=>setForm({...form,commissionDefault:e.target.value})}/></Field><Field label="Default order cutoff"><input value={form.cutoffHour} onChange={e=>setForm({...form,cutoffHour:e.target.value})}/></Field><Field full label="Support email"><input type="email" value={form.supportEmail} onChange={e=>setForm({...form,supportEmail:e.target.value})}/></Field></div><div className="section-label" style={{marginTop:18}}>Store listing subscription</div><p className="panel-sub">Monthly PayFast debit from Store Admin. Recommended beginner fee: R99.</p><div className="form-grid"><Field label="Monthly listing fee (R)"><input type="number" value={form.listingFeeMonthly} onChange={e=>setForm({...form,listingFeeMonthly:e.target.value})}/></Field><Field label="Free trial days"><input type="number" value={form.listingTrialDays} onChange={e=>setForm({...form,listingTrialDays:e.target.value})}/></Field><Field label="Grace days after expiry"><input type="number" value={form.listingGraceDays} onChange={e=>setForm({...form,listingGraceDays:e.target.value})}/></Field><Field label="Auto-approve after payment"><select value={form.listingAutoApprove?'true':'false'} onChange={e=>setForm({...form,listingAutoApprove:e.target.value==='true'})}><option value="true">Yes — go live when paid</option><option value="false">No — keep manual approval</option></select></Field></div>
+<div className="section-label" style={{marginTop:18}}>Checkout payment fees (pass-through)</div>
+<p className="panel-sub">Charged to the customer so BCM FoodHub does not absorb PayFast gateway costs. Default ≈ 3.5% + R2.</p>
+<div className="form-grid">
+<Field label="Enable payment fees"><select value={form.paymentFeeEnabled?'true':'false'} onChange={e=>setForm({...form,paymentFeeEnabled:e.target.value==='true'})}><option value="true">Yes</option><option value="false">No</option></select></Field>
+<Field label="Fee percent (%)"><input type="number" step="0.1" value={form.paymentFeePercent} onChange={e=>setForm({...form,paymentFeePercent:e.target.value})}/></Field>
+<Field label="Fixed fee (R)"><input type="number" step="0.01" value={form.paymentFeeFixed} onChange={e=>setForm({...form,paymentFeeFixed:e.target.value})}/></Field>
+<Field label="Fee label on checkout"><input value={form.paymentFeeLabel} onChange={e=>setForm({...form,paymentFeeLabel:e.target.value})}/></Field>
+</div>
+<button className="btn primary" style={{marginTop:14}} onClick={save}>Save platform settings</button>
+<div className="panel" style={{marginTop:18}}>
+  <h3>Launch checklist</h3>
+  <p className="panel-sub">Production readiness for BCM FoodHub.</p>
+  <button className="btn outline" onClick={()=>{
+    api('/api/admin/launch-checklist').then(data=>{
+      const lines=(data.checks||[]).map(c=>`${c.ok?'✓':'✗'} ${c.label}${c.detail?` (${c.detail})`:''}`).join('\n');
+      window.alert((data.ready?'READY TO SOFT-LAUNCH':'NOT READY')+'\n\n'+lines+'\n\n'+(data.nextSteps||[]).join('\n'));
+    }).catch(e=>notify(e.message,'error'));
+  }}>Run launch checklist</button>
+</div></section></>}
 
     function Fraud({notify}){
       const [flagged,setFlagged]=useState([]);
