@@ -158,6 +158,24 @@ const RefundRequestSchema = new mongoose.Schema({
 const RefundRequest = mongoose.models.RefundRequest || mongoose.model('RefundRequest', RefundRequestSchema);
 
 
+const ClientErrorSchema = new mongoose.Schema({
+  app: { type: String, enum: ['customer','store-admin','super-admin'], default: 'customer' },
+  message: String,
+  source: String,
+  lineno: Number,
+  colno: Number,
+  stack: String,
+  userAgent: String,
+  viewport: String,
+  view: String,
+  url: String,
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  createdAt: { type: Date, default: Date.now, index: true }
+}, { strict: false });
+ClientErrorSchema.index({ createdAt: -1 });
+ClientErrorSchema.index({ app: 1, createdAt: -1 });
+const ClientError = mongoose.models.ClientError || mongoose.model('ClientError', ClientErrorSchema);
+
 const NotificationSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, storeId: String, type: String,
   title: String, message: String, link: String, read: { type: Boolean, default: false }, createdAt: { type: Date, default: Date.now }
@@ -1317,6 +1335,43 @@ app.put('/api/admin/settings', adminAuth, async (req, res) => {
   await audit(req, 'update', 'settings', 'platform', 'Updated marketplace settings'); res.json(output);
 });
 app.get('/api/admin/audit', adminAuth, async (req, res) => res.json(await AdminAudit.find({}).populate('adminId','name username').sort({ createdAt: -1 }).limit(100)));
+// Centralized client error diagnostics (customer + store-admin)
+app.get('/api/admin/client-errors', adminAuth, async (req,res)=>{
+  const appFilter = String(req.query.app||'').trim();
+  const q = appFilter && ['customer','store-admin'].includes(appFilter) ? { app: appFilter } : {};
+  if(req.query.search){
+    const s = String(req.query.search).trim().slice(0,100);
+    q.$or = [{ message: new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i') }, { stack: new RegExp(s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i') }];
+  }
+  const items = await ClientError.find(q).sort({ createdAt: -1 }).limit(200).lean();
+  res.json(items);
+});
+app.delete('/api/admin/client-errors', adminAuth, async (req,res)=>{
+  const appFilter = String(req.query.app||'').trim();
+  const q = appFilter && ['customer','store-admin'].includes(appFilter) ? { app: appFilter } : {};
+  const result = await ClientError.deleteMany(q);
+  await AdminAudit.create({ adminId: req.user?._id, action: 'delete', entityType: 'client_error', entityId: appFilter||'all', summary: `Cleared ${result.deletedCount} client errors` }).catch(()=>{});
+  res.json({ ok:true, deletedCount: result.deletedCount });
+});
+app.post('/api/client-errors', async (req,res)=>{
+  try{
+    const body=req.body||{};
+    const doc = await ClientError.create({
+      app: String(body.app||'customer').trim().slice(0,20) || 'customer',
+      message: String(body.message||'').trim().slice(0,2000),
+      source: String(body.source||'').trim().slice(0,500),
+      lineno: Math.max(0, Number(body.lineno)||0),
+      colno: Math.max(0, Number(body.colno)||0),
+      stack: String(body.stack||'').trim().slice(0,5000),
+      userAgent: String(body.userAgent||req.headers['user-agent']||'').slice(0,500),
+      viewport: String(body.viewport||'').slice(0,50),
+      view: String(body.view||'').slice(0,100),
+      url: String(body.url||'').slice(0,500),
+      userId: null
+    });
+    res.status(201).json({ ok:true, id: doc._id });
+  }catch(e){ res.status(500).json({ error: e.message }); }
+});
 
 // --- Advanced Fraud Detection & System Diagnostics Endpoints ---
 app.get('/api/admin/fraud', adminAuth, async (req, res) => {
@@ -1489,5 +1544,6 @@ app.get('/api/health', (req, res) => {
   });
 });
 app.listen(PORT, '0.0.0.0', () => console.log(`🚀 BCM FoodHub Super Admin running at http://localhost:${PORT}`));
+
 
 
